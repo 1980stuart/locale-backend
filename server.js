@@ -4,6 +4,10 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
+app.get('/', (req, res) => {
+  res.json({ status: 'Locale backend running' });
+});
+
 app.post('/claude', async (req, res) => {
   try {
     const response = await fetch('https://api.anthropic.com/v1/messages', {
@@ -22,4 +26,5 @@ app.post('/claude', async (req, res) => {
   }
 });
 
-app.listen(process.env.PORT || 3001, () => console.log('Locale backend running'));
+const PORT = process.env.PORT || 3001;
+app.listen(PORT, () => console.log('Locale backend running on port ' + PORT));
