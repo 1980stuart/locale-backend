@@ -326,4 +326,100 @@ app.post('/recommendations', async (req, res) => {
 });
 
 const PORT = process.env.PORT || 3001;
+
+const SUPABASE_URL = process.env.SUPABASE_URL;
+const SUPABASE_KEY = process.env.SUPABASE_KEY;
+
+function supabaseHeaders() {
+  return {
+    'apikey': SUPABASE_KEY,
+    'Authorization': 'Bearer ' + SUPABASE_KEY,
+    'Content-Type': 'application/json'
+  };
+}
+
+app.post('/favourites', async (req, res) => {
+  try {
+    const { device_id, city, category, item_name, item_data } = req.body;
+    if (!device_id || !city || !category || !item_name) {
+      return res.status(400).json({ error: 'device_id, city, category, item_name are required' });
+    }
+    const r = await fetch(SUPABASE_URL + '/rest/v1/favourites', {
+      method: 'POST',
+      headers: { ...supabaseHeaders(), 'Prefer': 'return=representation' },
+      body: JSON.stringify({ device_id, city, category, item_name, item_data })
+    });
+    const data = await r.json();
+    res.json(data);
+  } catch(e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.get('/favourites', async (req, res) => {
+  try {
+    const { device_id } = req.query;
+    if (!device_id) return res.status(400).json({ error: 'device_id is required' });
+    const r = await fetch(
+      SUPABASE_URL + '/rest/v1/favourites?device_id=eq.' + encodeURIComponent(device_id) + '&order=created_at.desc',
+      { headers: supabaseHeaders() }
+    );
+    const data = await r.json();
+    res.json(data);
+  } catch(e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.delete('/favourites/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const r = await fetch(SUPABASE_URL + '/rest/v1/favourites?id=eq.' + encodeURIComponent(id), {
+      method: 'DELETE',
+      headers: supabaseHeaders()
+    });
+    res.json({ deleted: true });
+  } catch(e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post('/feedback', async (req, res) => {
+  try {
+    const { device_id, city, type, message } = req.body;
+    if (!city || !type || !message) {
+      return res.status(400).json({ error: 'city, type, message are required' });
+    }
+    if (type !== 'loved' && type !== 'suggestion') {
+      return res.status(400).json({ error: 'type must be loved or suggestion' });
+    }
+    const r = await fetch(SUPABASE_URL + '/rest/v1/feedback', {
+      method: 'POST',
+      headers: { ...supabaseHeaders(), 'Prefer': 'return=representation' },
+      body: JSON.stringify({ device_id, city, type, message })
+    });
+    const data = await r.json();
+    res.json(data);
+  } catch(e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+async function pingSupabase() {
+  try {
+    await fetch(SUPABASE_URL + '/rest/v1/keepalive', {
+      method: 'POST',
+      headers: { ...supabaseHeaders(), 'Prefer': 'return=minimal' },
+      body: JSON.stringify({})
+    });
+    console.log('Supabase keepalive ping sent');
+  } catch (e) {
+    console.log('Supabase keepalive ping failed:', e.message);
+  }
+}
+
+// Ping every 3 days to prevent Supabase free tier pausing after 7 days inactivity
+setInterval(pingSupabase, 3 * 24 * 60 * 60 * 1000);
+pingSupabase();
+
 app.listen(PORT, () => console.log('Locale backend running on port ' + PORT));
