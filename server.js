@@ -4,6 +4,17 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
+const SUPABASE_URL = process.env.SUPABASE_URL;
+const SUPABASE_KEY = process.env.SUPABASE_KEY;
+
+function supabaseHeaders() {
+  return {
+    'apikey': SUPABASE_KEY,
+    'Authorization': 'Bearer ' + SUPABASE_KEY,
+    'Content-Type': 'application/json'
+  };
+}
+
 app.get('/', (req, res) => {
   res.json({ status: 'Locale backend running' });
 });
@@ -279,6 +290,27 @@ app.post('/recommendations', async (req, res) => {
     if (!city || !category) {
       return res.status(400).json({ error: 'city and category are required' });
     }
+
+    const cacheKey = city.trim().toLowerCase() + '|' + category;
+
+    // Check cache first (24 hour freshness window)
+    try {
+      const cacheCheck = await fetch(
+        SUPABASE_URL + '/rest/v1/recommendations_cache?cache_key=eq.' + encodeURIComponent(cacheKey) + '&select=*',
+        { headers: supabaseHeaders() }
+      );
+      const cached = await cacheCheck.json();
+      if (Array.isArray(cached) && cached[0]) {
+        const ageMs = Date.now() - new Date(cached[0].created_at).getTime();
+        const twentyFourHours = 24 * 60 * 60 * 1000;
+        if (ageMs < twentyFourHours) {
+          return res.json(cached[0].response_data);
+        }
+      }
+    } catch (e) {
+      // cache check failed, continue to generate fresh
+    }
+
     if (category === 'essentials_info') {
       const r = await fetch('https://api.anthropic.com/v1/messages', {
         method: 'POST',
@@ -295,6 +327,7 @@ app.post('/recommendations', async (req, res) => {
         })
       });
       const d = await r.json();
+      saveToCache(cacheKey, d);
       return res.json(d);
     }
 
@@ -314,29 +347,41 @@ app.post('/recommendations', async (req, res) => {
       body: JSON.stringify({
         model: 'claude-sonnet-4-6',
         max_tokens: 2000,
-        system: MASTER_SYSTEM + '\n\nReturn only valid JSON. No markdown, no backticks, no explanation.',
+        system: [
+          {
+            type: 'text',
+            text: MASTER_SYSTEM,
+            cache_control: { type: 'ephemeral' }
+          },
+          {
+            type: 'text',
+            text: 'Return only valid JSON. No markdown, no backticks, no explanation.'
+          }
+        ],
         messages: [{ role: 'user', content: PROMPTS[category](city) + searchContext }]
       })
     });
     const data = await response.json();
+    saveToCache(cacheKey, data);
     res.json(data);
   } catch(e) {
     res.status(500).json({ error: e.message });
   }
 });
 
-const PORT = process.env.PORT || 3001;
-
-const SUPABASE_URL = process.env.SUPABASE_URL;
-const SUPABASE_KEY = process.env.SUPABASE_KEY;
-
-function supabaseHeaders() {
-  return {
-    'apikey': SUPABASE_KEY,
-    'Authorization': 'Bearer ' + SUPABASE_KEY,
-    'Content-Type': 'application/json'
-  };
+async function saveToCache(cacheKey, responseData) {
+  try {
+    await fetch(SUPABASE_URL + '/rest/v1/recommendations_cache', {
+      method: 'POST',
+      headers: { ...supabaseHeaders(), 'Prefer': 'resolution=merge-duplicates' },
+      body: JSON.stringify({ cache_key: cacheKey, response_data: responseData, created_at: new Date().toISOString() })
+    });
+  } catch (e) {
+    // cache save failed silently, not critical
+  }
 }
+
+const PORT = process.env.PORT || 3001;
 
 app.post('/favourites', async (req, res) => {
   try {
