@@ -371,13 +371,21 @@ app.post('/recommendations', async (req, res) => {
 
 async function saveToCache(cacheKey, responseData) {
   try {
-    await fetch(SUPABASE_URL + '/rest/v1/recommendations_cache', {
+    const r = await fetch(SUPABASE_URL + '/rest/v1/recommendations_cache', {
       method: 'POST',
-      headers: { ...supabaseHeaders(), 'Prefer': 'resolution=merge-duplicates' },
+      headers: { 
+        ...supabaseHeaders(), 
+        'Prefer': 'return=minimal,resolution=merge-duplicates',
+        'on-conflict': 'cache_key'
+      },
       body: JSON.stringify({ cache_key: cacheKey, response_data: responseData, created_at: new Date().toISOString() })
     });
+    if (!r.ok) {
+      const err = await r.text();
+      console.error('Cache save failed:', r.status, err);
+    }
   } catch (e) {
-    // cache save failed silently, not critical
+    console.error('Cache save error:', e.message);
   }
 }
 
