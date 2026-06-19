@@ -158,16 +158,20 @@ Two tests: WORLD CLASS (genuinely among the greatest works) and LOCAL (works loc
 
 Return JSON: {"items":[{"name":"","artist":"","type":"artwork|architecture|mural","imageSearch":"","location":"","neighbourhood":"","websiteSearch":"","opens":"","price":"","hiddenGem":false,"localTip":"","description":""}]}`,
 
-  walk: (city) => `You are Localé's Walk Agent for ${city}. Surface walking routes that reveal the true character of this city.
+  walk: (city) => `You are Localé's Walk Agent for ${city}. Surface walking routes, swimming spots, and lookouts that reveal the true character of this city.
 
 STRICT RULES FOR THIS TAB:
 - Always include national parks and nature reserves if they exist near ${city} — these are often the best walks
+- ALWAYS actively look for and include at least one swimming spot locals genuinely love (a swimming hole, beach, lake, river spot, lagoon, rock pool) if one exists within reasonable distance — do not skip this category just because it is not a traditional walking route
+- ALWAYS actively look for and include at least one lookout or scenic viewpoint locals actually visit (not just the obvious tourist lookout) if one exists
 - Descriptions must be accurate — correct start/end points, realistic distances, accurate terrain descriptions
 - NEVER include generic "walk around the old town" or primarily tourist routes
+- For swimming spots: note water conditions, safety considerations, and the best time of day or season
+- For lookouts: note the best time of day for light/views and how to actually get there
 
-Include: self-guided walks, national park trails, free walking tours run by locals, unique themed walks, local cycling routes. For each: name, type, accurate start and end point, distance, realistic time, best time of day, what makes it worth doing, any gear needed, food stop.
+Include: self-guided walks, national park trails, free walking tours run by locals, unique themed walks, local cycling routes, swimming spots, lookouts/viewpoints. For each: name, type, accurate start and end point (or location for swim spots/lookouts), distance, realistic time, best time of day, what makes it worth doing, any gear needed, food stop.
 
-Return JSON: {"items":[{"name":"","type":"selfguided|freetour|guidedtour|cycling|naturetrail","start":"","end":"","distance":"","duration":"","bestTime":"","mapSearch":"","foodStop":"","localTip":"","description":""}]}`,
+Return JSON: {"items":[{"name":"","type":"selfguided|freetour|guidedtour|cycling|naturetrail|swimspot|lookout","start":"","end":"","distance":"","duration":"","bestTime":"","mapSearch":"","foodStop":"","localTip":"","description":""}]}`,
 
   events: (city) => `You are Localé's Events Agent for ${city}. Surface what is actually happening — current events and landmark annual events.
 
@@ -225,7 +229,7 @@ const SEARCH_QUERIES = {
   eating: (city) => `${city} best local restaurants hidden gems ${currentYear}`,
   markets: (city) => `${city} local markets street food antique ${currentYear}`,
   art: (city) => `${city} best art galleries murals architecture ${currentYear}`,
-  walk: (city) => `${city} best walking routes local parks ${currentYear}`,
+  walk: (city) => `${city} best walking routes swimming spots lookouts local parks ${currentYear}`,
   events: (city) => `${city} events festivals what's on ${currentYear}`,
   drink: (city) => `${city} local bars drinks nightlife ${currentYear}`,
   night: (city) => `${city} things to do at night unique experiences ${currentYear}`,
@@ -365,7 +369,7 @@ app.post('/recommendations', async (req, res) => {
           },
           {
             type: 'text',
-            text: 'Return only valid JSON. No markdown, no backticks, no explanation. Do not add any text, notes, or commentary before or after the JSON object — including notes about items you excluded or chose not to include.'
+            text: 'Return only valid JSON. No markdown, no backticks, no explanation. Do not add any text, notes, or commentary before or after the JSON object — including notes about items you excluded or chose not to include. If you have low confidence in finding genuine results for this city/category, or can only confidently verify a small number of items, include a "note" field at the top level of the JSON object (alongside "items") explaining this briefly and honestly to the traveller — for example: {"note":"Only one coffee shop could be confidently verified as currently open in this town — fewer options exist here than in larger cities.","items":[...]}. Never write this explanation as plain text outside the JSON object.'
           }
         ],
         messages: [{ role: 'user', content: PROMPTS[category](city) + searchContext }]
