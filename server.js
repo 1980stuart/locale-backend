@@ -211,25 +211,27 @@ TWO TYPES: UNMISSABLE (world class AND locals love them) and UNEXPECTED (the thi
 Return JSON: {"items":[{"name":"","type":"unmissable|unexpected","why":"","localAngle":"","surprise":"","location":"","neighbourhood":"","bestTime":"","duration":"","price":"","bookAhead":false,"localTip":"","description":""}]}`
 };
 
+const currentYear = new Date().getFullYear();
+
 const SEARCH_QUERIES = {
-  essentials: (city) => `${city} transport currency tips locals 2026`,
-  neighbourhoods: (city) => `${city} best neighbourhoods locals live 2026`,
-  coffee: (city) => `${city} best local coffee shops independent 2026`,
-  food: (city) => `${city} iconic local dishes street food 2026`,
-  eating: (city) => `${city} best local restaurants hidden gems 2026`,
-  markets: (city) => `${city} local markets street food antique 2026`,
-  art: (city) => `${city} best art galleries murals architecture 2026`,
-  walk: (city) => `${city} best walking routes local parks 2026`,
-  events: (city) => `${city} events festivals what's on 2026`,
-  drink: (city) => `${city} local bars drinks nightlife 2026`,
-  night: (city) => `${city} things to do at night unique experiences 2026`,
-  mustsee: (city) => `${city} must see attractions locals recommend 2026`,
+  essentials: (city) => `${city} transport currency tips locals ${currentYear}`,
+  neighbourhoods: (city) => `${city} best neighbourhoods locals live ${currentYear}`,
+  coffee: (city) => `${city} best local coffee shops independent ${currentYear}`,
+  food: (city) => `${city} iconic local dishes street food ${currentYear}`,
+  eating: (city) => `${city} best local restaurants hidden gems ${currentYear}`,
+  markets: (city) => `${city} local markets street food antique ${currentYear}`,
+  art: (city) => `${city} best art galleries murals architecture ${currentYear}`,
+  walk: (city) => `${city} best walking routes local parks ${currentYear}`,
+  events: (city) => `${city} events festivals what's on ${currentYear}`,
+  drink: (city) => `${city} local bars drinks nightlife ${currentYear}`,
+  night: (city) => `${city} things to do at night unique experiences ${currentYear}`,
+  mustsee: (city) => `${city} must see attractions locals recommend ${currentYear}`,
 };
 
 async function fetchSearchContext(city, category) {
   try {
     const queryFn = SEARCH_QUERIES[category];
-    const q = queryFn ? queryFn(city) : `${city} ${category} 2026`;
+    const q = queryFn ? queryFn(city) : `${city} ${category} ${currentYear}`;
     const url = 'https://www.googleapis.com/customsearch/v1?key=' +
       process.env.GOOGLE_SEARCH_KEY +
       '&cx=' + process.env.GOOGLE_SEARCH_CX +
