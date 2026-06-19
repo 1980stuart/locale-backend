@@ -126,7 +126,7 @@ STRICT RULES FOR THIS TAB:
 - CRITICAL: Only include restaurants you are highly confident currently exist and are open. If uncertain — omit entirely. Never recommend a closed restaurant.
 - NEVER include tourist restaurants, chains, or places where the majority of diners are tourists
 - Use $ cheap $$ mid $$$ special for price
-- Only include dietary tags that genuinely apply: vegetarian, vegan, halal, kosher, pescatarian, glutenfree
+- Return a maximum of 7 items — curated, not comprehensive
 
 For each: name, exact neighbourhood/street, the single dish to order, price, best time (specific), whether to book, dietary flags, local tip.
 
