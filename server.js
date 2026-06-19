@@ -330,7 +330,7 @@ app.post('/recommendations', async (req, res) => {
           model: 'claude-sonnet-4-6',
           max_tokens: 500,
           system: 'Return only valid JSON. No markdown, no backticks, no explanation.',
-          messages: [{ role: 'user', content: `For ${city} return JSON with: {"cityTag":"one evocative line capturing this city soul","funFact":"one genuinely surprising or delightful true fact about this city that most visitors don't know","weather":{"temp":"e.g. 28°C","condition":"sunny|cloudy|rainy|stormy","summary":"one line"},"currency":{"code":"e.g. EUR","symbol":"e.g. €","rate":"e.g. 1 USD = 0.92 EUR"}}` }]
+          messages: [{ role: 'user', content: `For ${city} return JSON with: {"cityTag":"one evocative line capturing this city soul","funFact":"one genuinely surprising or delightful true fact about this city that most visitors do not know","weather":{"temp":"e.g. 28°C","condition":"sunny|cloudy|rainy|stormy","summary":"one line"},"currency":{"code":"e.g. EUR","symbol":"e.g. €","rate":"e.g. 1 USD = 0.92 EUR"}}` }]
         })
       });
       const d = await r.json();
