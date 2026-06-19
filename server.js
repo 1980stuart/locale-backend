@@ -101,13 +101,14 @@ Return JSON: {"items":[{"name":"","vibe":"","who":"","description":"","bestFor":
 
 STRICT RULES FOR THIS TAB:
 - CRITICAL: Only include coffee shops you are highly confident are currently open and trading. If you have any doubt — omit the venue entirely. A closed recommendation destroys trust.
+- If you decide partway through generating an item that it should be excluded, do NOT include that item in the array at all — not even as a placeholder with empty fields. Simply leave it out and continue with the next genuine recommendation.
 - Prioritise places in the main town centre and downtown areas — do not miss well-known local cafes
 - Prioritise places open before 8am — these are almost always the genuine local spots
 - NEVER include Starbucks, Costa, Gloria Jeans or any chain
 
-For each: name, exact neighbourhood/street, opening time, earlyBird flag if before 8am, what locals order, what makes it irreplaceable, price (specific), local tip.
+For each: name, exact neighbourhood/street, opening time, earlyBird flag if before 8am, what locals order, what makes it irreplaceable, price (specific), local tip, a precise map search term combining the venue name and street/area for accurate map lookup.
 
-Return JSON: {"items":[{"name":"","neighbourhood":"","opens":"","earlyBird":true,"order":"","price":"","localTip":"","description":""}]}`,
+Return JSON: {"items":[{"name":"","neighbourhood":"","opens":"","earlyBird":true,"order":"","price":"","localTip":"","mapSearch":"","description":""}]}`,
 
   food: (city) => `You are Localé's Food Agent for ${city}. Surface dishes and street food that define this city's food identity. THE BOURDAIN TEST APPLIES.
 
@@ -124,14 +125,15 @@ Return JSON: {"items":[{"name":"","localName":"","section":"dish|streetfood","wh
 
 STRICT RULES FOR THIS TAB:
 - CRITICAL: Only include restaurants you are highly confident currently exist and are open. If uncertain — omit entirely. Never recommend a closed restaurant.
+- If you decide partway through generating an item that it should be excluded, do NOT include that item in the array at all — not even as a placeholder with empty fields. Simply leave it out and continue with the next genuine recommendation.
 - NEVER include tourist restaurants, chains, or places where the majority of diners are tourists
 - Use $ cheap $$ mid $$$ special for price
 - Only include dietary tags that genuinely apply: vegetarian, vegan, halal, kosher, pescatarian, glutenfree
 - Return a maximum of 7 items — curated, not comprehensive
 
-For each: name, exact neighbourhood/street, the single dish to order, price, best time (specific), whether to book, dietary flags, local tip.
+For each: name, exact neighbourhood/street, the single dish to order, price, best time (specific), whether to book, dietary flags, local tip, a precise map search term combining the venue name and street/area for accurate map lookup.
 
-Return JSON: {"items":[{"name":"","neighbourhood":"","mustOrder":"","price":"$","bestTime":"","bookAhead":false,"dietary":[],"localTip":"","description":""}]}`,
+Return JSON: {"items":[{"name":"","neighbourhood":"","mustOrder":"","price":"$","bestTime":"","bookAhead":false,"dietary":[],"localTip":"","mapSearch":"","description":""}]}`,
 
   markets: (city) => `You are Localé's Markets Agent for ${city}. Find markets locals actually use — not sanitised tourist markets.
 
@@ -141,9 +143,9 @@ STRICT RULES FOR THIS TAB:
 - Only include actual markets — street markets, food markets, produce markets, antique/flea markets
 - Include well-known regional markets near ${city} if they are within reasonable distance
 
-For each: name, exact location, type (food/produce/antique/flea/specialist/night), best day and time (specific — "Sunday from 6am" not "weekends"), what to buy, price range, how to get there.
+For each: name, exact location, type (food/produce/antique/flea/specialist/night), best day and time (specific — "Sunday from 6am" not "weekends"), what to buy, price range, how to get there, a precise map search term combining the market name and street/area for accurate map lookup.
 
-Return JSON: {"items":[{"name":"","type":"","neighbourhood":"","when":"","bestTime":"","buyThis":"","price":"","howToGet":"","localTip":"","description":""}]}`,
+Return JSON: {"items":[{"name":"","type":"","neighbourhood":"","when":"","bestTime":"","buyThis":"","price":"","howToGet":"","localTip":"","mapSearch":"","description":""}]}`,
 
   art: (city) => `You are Localé's Art Agent for ${city}. Surface artworks and architecture that define this city's cultural identity.
 
@@ -183,12 +185,13 @@ Return JSON: {"items":[{"name":"","type":"cultural|sporting|music|community|food
 
 STRICT RULES FOR THIS TAB:
 - CRITICAL: Only include bars and venues you are highly confident currently exist and are open
+- If you decide partway through generating an item that it should be excluded, do NOT include that item in the array at all — not even as a placeholder with empty fields. Simply leave it out and continue with the next genuine recommendation.
 - Only recommend drinks culture genuinely specific to ${city} — never import drinking culture from another country or region
 - Include the main well-known local bars that locals actually use — do not miss obvious key venues
 
-Three sections: LOCAL DRINK (what this city/region actually drinks — specific beer/wine/spirit, how locals drink it, price), LOCAL BAR (where locals actually drink — name, neighbourhood, what to order, best time, price for a round), DRINKING RITUAL (when and how locals drink, social rules, food that accompanies). THE GOLD STANDARD: Bia Hơi in Hanoi. Find the equivalent.
+Three sections: LOCAL DRINK (what this city/region actually drinks — specific beer/wine/spirit, how locals drink it, price), LOCAL BAR (where locals actually drink — name, neighbourhood, what to order, best time, price for a round, a precise map search term for venues only), DRINKING RITUAL (when and how locals drink, social rules, food that accompanies). THE GOLD STANDARD: Bia Hơi in Hanoi. Find the equivalent.
 
-Return JSON: {"items":[{"name":"","type":"localdrink|bar|ritual|producer","drink":"","neighbourhood":"","bestTime":"","price":"","orderThis":"","ritual":"","localTip":"","description":""}]}`,
+Return JSON: {"items":[{"name":"","type":"localdrink|bar|ritual|producer","drink":"","neighbourhood":"","bestTime":"","price":"","orderThis":"","ritual":"","localTip":"","mapSearch":"","description":""}]}`,
 
   night: (city) => `You are Localé's Night Agent for ${city}. Answer one question: What can you ONLY do at night in THIS city that you cannot do anywhere else in the world?
 
@@ -362,7 +365,7 @@ app.post('/recommendations', async (req, res) => {
           },
           {
             type: 'text',
-            text: 'Return only valid JSON. No markdown, no backticks, no explanation.'
+            text: 'Return only valid JSON. No markdown, no backticks, no explanation. Do not add any text, notes, or commentary before or after the JSON object — including notes about items you excluded or chose not to include.'
           }
         ],
         messages: [{ role: 'user', content: PROMPTS[category](city) + searchContext }]
