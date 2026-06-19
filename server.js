@@ -308,12 +308,15 @@ app.post('/recommendations', async (req, res) => {
         const ageMs = Date.now() - new Date(cached[0].created_at).getTime();
         const twentyFourHours = 24 * 60 * 60 * 1000;
         if (ageMs < twentyFourHours) {
+          console.log('CACHE_HIT', cacheKey);
           return res.json(cached[0].response_data);
         }
       }
     } catch (e) {
       // cache check failed, continue to generate fresh
     }
+
+    console.log('CACHE_MISS', cacheKey);
 
     if (category === 'essentials_info') {
       const r = await fetch('https://api.anthropic.com/v1/messages', {
