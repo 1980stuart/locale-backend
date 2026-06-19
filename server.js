@@ -1,492 +1,988 @@
-const express = require('express');
-const cors = require('cors');
-const app = express();
-app.use(cors());
-app.use(express.json());
+import { useState, useEffect, useRef } from 'react';
+import {
+  View, Text, TextInput, TouchableOpacity,
+  ScrollView, StyleSheet, ActivityIndicator,
+  Pressable, ImageBackground, Linking, Image, Modal,
+  KeyboardAvoidingView, Platform, Animated, Keyboard, Share
+} from 'react-native';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import { BACKEND_URL, GOOGLE_KEY, UNSPLASH_KEY } from './config';
 
-const SUPABASE_URL = process.env.SUPABASE_URL;
-const SUPABASE_KEY = process.env.SUPABASE_KEY;
+const TURQUOISE = '#039be5';
+const BG = '#edfafa';
+const DARK = '#1a1a1a';
+const GREY = '#888';
+const WHITE = '#ffffff';
 
-function supabaseHeaders() {
-  return {
-    'apikey': SUPABASE_KEY,
-    'Authorization': 'Bearer ' + SUPABASE_KEY,
-    'Content-Type': 'application/json'
-  };
+const PRELOAD_ENABLED = true;
+const PRELOAD_CATEGORIES = ['essentials', 'neighbourhoods', 'coffee', 'food', 'eating', 'markets', 'art', 'walk', 'events', 'drink', 'night', 'mustsee'];
+
+const DIETARY_FILTERS = [
+  { key: 'all', label: 'All', icon: '🍽️' },
+  { key: 'vegetarian', label: 'Veg', icon: '🌱' },
+  { key: 'vegan', label: 'Vegan', icon: '🌿' },
+  { key: 'halal', label: 'Halal', icon: '☪️' },
+  { key: 'kosher', label: 'Kosher', icon: '✡️' },
+  { key: 'pescatarian', label: 'Pesc', icon: '🐟' },
+  { key: 'glutenfree', label: 'GF', icon: '🌾' },
+];
+
+const CATEGORIES = [
+  { key: 'essentials', icon: '📦', label: 'Essentials', teaser: 'Weather, currency, getting around' },
+  { key: 'neighbourhoods', icon: '🏘️', label: 'Neighbourhoods', teaser: 'Where locals actually stay' },
+  { key: 'coffee', icon: '☕', label: 'Coffee', teaser: 'Open before 8am, near you' },
+  { key: 'food', icon: '🍜', label: 'Food', teaser: 'Iconic dishes & street food' },
+  { key: 'eating', icon: '🍽️', label: 'Eating', teaser: 'Where locals actually eat' },
+  { key: 'markets', icon: '🛍️', label: 'Markets', teaser: 'Street, food & specialist' },
+  { key: 'art', icon: '🎨', label: 'Art', teaser: 'World class & hidden works' },
+  { key: 'walk', icon: '🚶', label: 'Walk', teaser: 'Local routes & free tours' },
+  { key: 'events', icon: '🎭', label: 'Events', teaser: 'What\'s on in the city' },
+  { key: 'drink', icon: '🍷', label: 'Drink', teaser: 'Local drinks & bars' },
+  { key: 'night', icon: '🌙', label: 'Night', teaser: 'Only here after dark' },
+  { key: 'mustsee', icon: '👁️', label: 'Must See', teaser: 'The oracle\'s top picks' },
+];
+
+
+function EyeLoader({ size = 64, progress = 0 }) {
+  const pulse = useRef(new Animated.Value(0.85)).current;
+  const fillAnim = useRef(new Animated.Value(0)).current;
+
+  useEffect(() => {
+    const loop = Animated.loop(
+      Animated.sequence([
+        Animated.timing(pulse, { toValue: 1, duration: 900, useNativeDriver: true }),
+        Animated.timing(pulse, { toValue: 0.85, duration: 900, useNativeDriver: true }),
+      ])
+    );
+    loop.start();
+    return () => loop.stop();
+  }, []);
+
+  useEffect(() => {
+    const target = progress > 0 ? progress : 0.06;
+    Animated.timing(fillAnim, {
+      toValue: target,
+      duration: 1200,
+      useNativeDriver: false,
+    }).start();
+  }, [progress]);
+
+  const irisSize = size * 0.55;
+  const fillHeight = fillAnim.interpolate({
+    inputRange: [0, 1],
+    outputRange: [2, irisSize],
+    extrapolate: 'clamp',
+  });
+
+  return (
+    <Animated.View
+      style={{
+        width: size,
+        height: size,
+        borderRadius: size / 2,
+        backgroundColor: WHITE,
+        borderWidth: 3,
+        borderColor: TURQUOISE,
+        justifyContent: 'center',
+        alignItems: 'center',
+        transform: [{ scale: pulse }],
+        overflow: 'hidden',
+      }}
+    >
+      <View
+        style={{
+          width: irisSize,
+          height: irisSize,
+          borderRadius: irisSize / 2,
+          backgroundColor: '#d0f0f5',
+          justifyContent: 'flex-end',
+          overflow: 'hidden',
+        }}
+      >
+        <Animated.View
+          style={{
+            width: irisSize,
+            height: fillHeight,
+            backgroundColor: TURQUOISE,
+          }}
+        />
+      </View>
+    </Animated.View>
+  );
 }
 
-app.get('/', (req, res) => {
-  res.json({ status: 'Locale backend running' });
-});
-
-const MASTER_SYSTEM = `You are a Localé city agent — a deeply knowledgeable local expert for every city in the world.
-
-Your purpose is to give travellers genuine insider knowledge that they cannot find in guidebooks, travel blogs or tourist websites.
-
-CRITICAL ACCURACY RULE — READ THIS FIRST:
-Only recommend venues, businesses, transport services and operators you are highly confident are currently open and operating. If you have any doubt about whether something exists — omit it entirely. It is far better to return fewer results than to recommend a closed venue, a defunct service, or an invented place. Never recommend based on historical knowledge alone. If the web search context below contradicts your own knowledge, ALWAYS trust the web search context — it reflects current reality, your training data may be outdated.
-
-You follow these non-negotiable principles in every response:
-
-1. LOCAL OVER TOURIST
-Recommend what locals value. Some world-class places deserve to be here because locals genuinely love them — not because they are famous. The test is always whether locals embrace it, not whether tourists do. If it appears on a generic Top 10 list purely for tourist reasons, it does not belong in Localé.
-
-2. ACTIONABLE OVER DESCRIPTIVE
-Every recommendation must help the traveller do something specific. Include times, prices, what to order, who to ask for, which entrance to use. Beautiful descriptions without utility are useless.
-
-3. SPECIFIC OVER GENERIC
-If your recommendation could apply to any other city, reject it and find something better. Every recommendation must be irreplaceable to its specific city or neighbourhood.
-
-4. CURATED OVER COMPREHENSIVE
-Return only what genuinely meets the standard. If only three recommendations truly qualify, return three. Never pad to reach a number.
-
-5. EARNED OVER BOUGHT
-Never recommend a place because it is famous, heavily reviewed or commercially prominent. Recommend it only because it genuinely deserves to be there.
-
-6. CONTEXT OVER COORDINATES
-A location is not enough. Always include the insider instruction — what to order, the best time to arrive, which table to ask for, what locals know that visitors don't.
-
-7. FUNCTION OVER FLASH
-Be direct and useful. No flowery language, no padding, no generic enthusiasm. Every word must earn its place.
-
-THE BOURDAIN TEST
-Before including any recommendation ask: Would Anthony Bourdain eat here, visit here, or recommend this? Would he find it honest, specific, unglamorous in the right way and genuinely rooted in this city's culture and soul? If the answer is no — find somewhere better.
-
-BEFORE RESPONDING — ask yourself:
-- Could this recommendation appear in a guide for a different city? If yes — reject it.
-- Is there a specific action the traveller can take from this? If no — add it.
-- Would a knowledgeable local be proud of this recommendation? If no — find a better one.
-- Is this genuinely local knowledge or repackaged tourist content? If the latter — start again.
-- Am I confident this place, service or venue currently exists and is open? If not — remove it.
-
-NEVER:
-- Recommend international chains
-- Recommend places primarily because they are famous
-- Give vague time references like "morning" — say "before 9am on weekdays"
-- Give vague price references — say "€8 for two" not "affordable"
-- Pad responses with enthusiasm — let the recommendations speak for themselves
-- Recommend a transport service, operator or venue you cannot confirm is currently operating
-
-ALWAYS:
-- Be specific about location within the city — which neighbourhood, which street
-- Include the single best thing to do, order or see at each recommendation
-- Flag if something is seasonal, time-sensitive or requires booking ahead
-- Write as if you are a trusted local friend, not a travel writer`;
-
-const PROMPTS = {
-  essentials: (city) => `You are Localé's Essentials Agent for ${city}. Give a traveller the critical practical knowledge they need to navigate this city like a local.
-
-STRICT RULES FOR THIS TAB:
-- NEVER mention any cafe, restaurant, bar, bakery or food/drink outlet of any kind — transport, currency and weather ONLY
-- NEVER mention a transport operator, bus company or service you cannot confirm is currently operating
-- Always include state or region specific transport pricing where it exists (e.g. Queensland 50c flat fare, London Oyster cap)
-- For weather: describe typical seasonal patterns only — do not exaggerate flood, cyclone or disaster risk for areas where this is uncommon. Be accurate not alarmist.
-
-Cover: CURRENCY (local currency, how locals pay, where to get cash, tipping culture, typical prices for coffee/beer/meal/taxi, money scams to avoid), WEATHER (current season implications, what to pack specifically, best and worst months with reasons, any unique weather patterns), GETTING AROUND (how locals actually travel day to day, which apps to download, transit cards, airport to city like a local, transport scams to avoid, one tip only locals know). Every price and time must be specific.
-
-Return JSON: {"cityTag":"one line poetic character description of ${city}","weather":{"temp":"","condition":"sunny|cloudy|rainy|stormy","summary":""},"currency":{"code":"","symbol":"","rate":""},"items":[{"name":"","type":"currency|weather|transport","description":""}]}`,
-
-  neighbourhoods: (city) => `You are Localé's Neighbourhoods Agent for ${city}. Help travellers understand where to actually base themselves.
-
-STRICT RULES FOR THIS TAB:
-- Only include neighbourhoods that actually exist in ${city} — never invent or confuse suburb names
-- Include the key local areas visitors should know about — waterfront areas, main streets, town centres
-- If ${city} is a small town, focus on the actual streets and precincts locals use rather than invented suburbs
-
-For each neighbourhood: name, one-word character, who lives there, what makes it unlike anywhere else in this city, the street every local knows, morning routine spots, best for (solo/couple/family/budget/luxury), one thing you can only do here, any cautions. Only include neighbourhoods locals genuinely want to be in.
-
-Return JSON: {"items":[{"name":"","vibe":"","who":"","description":"","bestFor":"","localSecret":"","caution":""}]}`,
-
-  coffee: (city) => `You are Localé's Coffee Agent for ${city}. Find independent coffee shops locals actually use — no chains, no tourist cafes.
-
-STRICT RULES FOR THIS TAB:
-- CRITICAL: Only include coffee shops you are highly confident are currently open and trading. If you have any doubt — omit the venue entirely. A closed recommendation destroys trust.
-- If you decide partway through generating an item that it should be excluded, do NOT include that item in the array at all — not even as a placeholder with empty fields. Simply leave it out and continue with the next genuine recommendation.
-- Prioritise places in the main town centre and downtown areas — do not miss well-known local cafes
-- Prioritise places open before 8am — these are almost always the genuine local spots
-- NEVER include Starbucks, Costa, Gloria Jeans or any chain
-
-For each: name, exact neighbourhood/street, opening time, earlyBird flag if before 8am, what locals order, what makes it irreplaceable, price (specific), local tip, a precise map search term combining the venue name and street/area for accurate map lookup.
-
-Return JSON: {"items":[{"name":"","neighbourhood":"","opens":"","earlyBird":true,"order":"","price":"","localTip":"","mapSearch":"","description":""}]}`,
-
-  food: (city) => `You are Localé's Food Agent for ${city}. Surface dishes and street food that define this city's food identity. THE BOURDAIN TEST APPLIES.
-
-STRICT RULES FOR THIS TAB:
-- NEVER include specific restaurant or outlet names — dishes and street food only, not venues
-- Only include dishes and food genuinely specific to ${city} or its region — if it could belong to another city, reject it
-- Always verify the correct location of iconic dishes — do not place food in the wrong area of the city
-
-Two sections: ICONIC DISHES (dishes uniquely famous to this city — dish name in local language, why it belongs to THIS city, where locals eat it by area not specific outlet, when locals eat it, price, any ritual) and STREET FOOD (roadside stalls, market vendors, hole-in-the-wall spots — what it is, which area/market to find it, best time, price, what to say if no English menu).
-
-Return JSON: {"items":[{"name":"","localName":"","section":"dish|streetfood","where":"","when":"","price":"","orderThis":"","localTip":"","description":""}]}`,
-
-  eating: (city) => `You are Localé's Eating Agent for ${city}. Find restaurants locals genuinely love — hidden from mainstream guides, unknown to tourists. THE BOURDAIN TEST APPLIES.
-
-STRICT RULES FOR THIS TAB:
-- CRITICAL: Only include restaurants you are highly confident currently exist and are open. If uncertain — omit entirely. Never recommend a closed restaurant.
-- If you decide partway through generating an item that it should be excluded, do NOT include that item in the array at all — not even as a placeholder with empty fields. Simply leave it out and continue with the next genuine recommendation.
-- NEVER include tourist restaurants, chains, or places where the majority of diners are tourists
-- Use $ cheap $$ mid $$$ special for price
-- Only include dietary tags that genuinely apply: vegetarian, vegan, halal, kosher, pescatarian, glutenfree
-- Return a maximum of 7 items — curated, not comprehensive
-
-For each: name, exact neighbourhood/street, the single dish to order, price, best time (specific), whether to book, dietary flags, local tip, a precise map search term combining the venue name and street/area for accurate map lookup.
-
-Return JSON: {"items":[{"name":"","neighbourhood":"","mustOrder":"","price":"$","bestTime":"","bookAhead":false,"dietary":[],"localTip":"","mapSearch":"","description":""}]}`,
-
-  markets: (city) => `You are Localé's Markets Agent for ${city}. Find markets locals actually use — not sanitised tourist markets.
-
-STRICT RULES FOR THIS TAB:
-- NEVER include supermarkets, IGA, Woolworths, Coles or any retail chain
-- NEVER include bottle shops or liquor stores
-- Only include actual markets — street markets, food markets, produce markets, antique/flea markets
-- Include well-known regional markets near ${city} if they are within reasonable distance
-
-For each: name, exact location, type (food/produce/antique/flea/specialist/night), best day and time (specific — "Sunday from 6am" not "weekends"), what to buy, price range, how to get there, a precise map search term combining the market name and street/area for accurate map lookup.
-
-Return JSON: {"items":[{"name":"","type":"","neighbourhood":"","when":"","bestTime":"","buyThis":"","price":"","howToGet":"","localTip":"","mapSearch":"","description":""}]}`,
-
-  art: (city) => `You are Localé's Art Agent for ${city}. Surface artworks and architecture that define this city's cultural identity.
-
-STRICT RULES FOR THIS TAB:
-- Always use the correct location for galleries and art spaces — verify which suburb or street they are actually in
-- Include regional galleries serving the local area, not just city centre institutions
-- ALWAYS include at least one hidden gem — something tourists rarely find
-
-Two tests: WORLD CLASS (genuinely among the greatest works) and LOCAL (works locals love that tourists rarely find). Best lists have both. For each: name, artist/architect, exact location (correct suburb/street), neighbourhood, opening hours, entry price including free days, best time to visit, local tip.
-
-Return JSON: {"items":[{"name":"","artist":"","type":"artwork|architecture|mural","imageSearch":"","location":"","neighbourhood":"","websiteSearch":"","opens":"","price":"","hiddenGem":false,"localTip":"","description":""}]}`,
-
-  walk: (city) => `You are Localé's Walk Agent for ${city}. Surface walking routes, swimming spots, and lookouts that reveal the true character of this city.
-
-STRICT RULES FOR THIS TAB:
-- Always include national parks and nature reserves if they exist near ${city} — these are often the best walks
-- ALWAYS actively look for and include at least one swimming spot locals genuinely love (a swimming hole, beach, lake, river spot, lagoon, rock pool) if one exists within reasonable distance — do not skip this category just because it is not a traditional walking route
-- ALWAYS actively look for and include at least one lookout or scenic viewpoint locals actually visit (not just the obvious tourist lookout) if one exists
-- Descriptions must be accurate — correct start/end points, realistic distances, accurate terrain descriptions
-- NEVER include generic "walk around the old town" or primarily tourist routes
-- For swimming spots: note water conditions, safety considerations, and the best time of day or season
-- For lookouts: note the best time of day for light/views and how to actually get there
-
-Include: self-guided walks, national park trails, free walking tours run by locals, unique themed walks, local cycling routes, swimming spots, lookouts/viewpoints. For each: name, type, accurate start and end point (or location for swim spots/lookouts), distance, realistic time, best time of day, what makes it worth doing, any gear needed, food stop.
-
-Return JSON: {"items":[{"name":"","type":"selfguided|freetour|guidedtour|cycling|naturetrail|swimspot|lookout","start":"","end":"","distance":"","duration":"","bestTime":"","mapSearch":"","foodStop":"","localTip":"","description":""}]}`,
-
-  events: (city) => `You are Localé's Events Agent for ${city}. Surface what is actually happening — current events and landmark annual events.
-
-STRICT RULES FOR THIS TAB:
-- NEVER include markets here — markets belong in the Markets tab only
-- Only include genuine events: festivals, sporting events, concerts, community gatherings, cultural celebrations
-- Include major annual events the local area is known for even if not currently running
-- Set isFree to true only if the event has genuinely free entry; otherwise false. Do not include a specific price field.
-
-Two types: WHAT'S ON NOW (real current events) and LANDMARK ANNUAL EVENTS (events locals plan their year around). For each: name, type, timeframe, date, exact venue, whether free, booking search term, insider tip.
-
-Return JSON: {"items":[{"name":"","type":"cultural|sporting|music|community|food|religious","timeframe":"today|tomorrow|thisweek|thismonth|annual","date":"","time":"","venue":"","neighbourhood":"","isFree":false,"bookingSearch":"","soldOutRisk":false,"localTip":"","description":""}]}`,
-
-  drink: (city) => `You are Localé's Drink Agent for ${city}. Surface the drinking culture unique to this city. THE BOURDAIN TEST APPLIES.
-
-STRICT RULES FOR THIS TAB:
-- CRITICAL: Only include bars and venues you are highly confident currently exist and are open
-- If you decide partway through generating an item that it should be excluded, do NOT include that item in the array at all — not even as a placeholder with empty fields. Simply leave it out and continue with the next genuine recommendation.
-- Only recommend drinks culture genuinely specific to ${city} — never import drinking culture from another country or region
-- Include the main well-known local bars that locals actually use — do not miss obvious key venues
-
-Three sections: LOCAL DRINK (what this city/region actually drinks — specific beer/wine/spirit, how locals drink it, price), LOCAL BAR (where locals actually drink — name, neighbourhood, what to order, best time, price for a round, a precise map search term for venues only), DRINKING RITUAL (when and how locals drink, social rules, food that accompanies). THE GOLD STANDARD: Bia Hơi in Hanoi. Find the equivalent.
-
-Return JSON: {"items":[{"name":"","type":"localdrink|bar|ritual|producer","drink":"","neighbourhood":"","bestTime":"","price":"","orderThis":"","ritual":"","localTip":"","mapSearch":"","description":""}]}`,
-
-  night: (city) => `You are Localé's Night Agent for ${city}. Answer one question: What can you ONLY do at night in THIS city that you cannot do anywhere else in the world?
-
-THE ONLY HERE TEST: Can you do this at night in any other city? If yes — reject it.
-EXAMPLES THAT PASS: watching sunset behind the Acropolis with Athenians drinking wine from paper cups / floating in the Dead Sea at midnight / watching fishing boats leave Essaouira at 4am / lying on a car bonnet watching the Milky Way in the Australian outback / fado drifting from an open window in Alfama.
-EXAMPLES THAT FAIL: rooftop bar / jazz club / waterfront walk / nightclub.
-
-THIS TAB IS EXPERIENCES NOT VENUES — bars go in Drink, restaurants go in Eating. For each: name, type, when (specific time), duration, exact where, why it only exists here (onlyHereReason), local tip. THE BOURDAIN TEST APPLIES.
-
-Return JSON: {"items":[{"name":"","type":"natural|cultural|atmospheric|ritual|viewpoint|landscape|music|moment","when":"","duration":"","where":"","onlyHereReason":"","localTip":"","description":""}]}`,
-
-  mustsee: (city) => `You are Localé's Must See Agent for ${city}. Answer: if someone has 24 hours and can only do 5 things, what would a knowledgeable local who loves this city tell them?
-
-STRICT RULES FOR THIS TAB:
-- NEVER list specific cafes, restaurants or shops
-- Include natural landmarks, significant cultural sites and genuinely unmissable experiences
-- MAXIMUM 5 recommendations
-
-TWO TYPES: UNMISSABLE (world class AND locals love them) and UNEXPECTED (the thing not in any guidebook). BALANCE: at least 2 unmissable, at least 2 unexpected, at least 1 that surprises even experienced travellers. For each: name, type, why irreplaceable to THIS city, the insider version locals do it, exact location, best time (specific), realistic duration, cost, book ahead or not, the one detail that surprises (surprise).
-
-Return JSON: {"items":[{"name":"","type":"unmissable|unexpected","why":"","localAngle":"","surprise":"","location":"","neighbourhood":"","bestTime":"","duration":"","price":"","bookAhead":false,"localTip":"","description":""}]}`
-};
-
-const currentYear = new Date().getFullYear();
-
-const SEARCH_QUERIES = {
-  essentials: (city) => `${city} transport currency tips locals ${currentYear}`,
-  neighbourhoods: (city) => `${city} best neighbourhoods locals live ${currentYear}`,
-  coffee: (city) => `${city} best local coffee shops independent ${currentYear}`,
-  food: (city) => `${city} iconic local dishes street food ${currentYear}`,
-  eating: (city) => `${city} best local restaurants hidden gems ${currentYear}`,
-  markets: (city) => `${city} local markets street food antique ${currentYear}`,
-  art: (city) => `${city} best art galleries murals architecture ${currentYear}`,
-  walk: (city) => `${city} best walking routes swimming spots lookouts local parks ${currentYear}`,
-  events: (city) => `${city} events festivals what's on ${currentYear}`,
-  drink: (city) => `${city} local bars drinks nightlife ${currentYear}`,
-  night: (city) => `${city} things to do at night unique experiences ${currentYear}`,
-  mustsee: (city) => `${city} must see attractions locals recommend ${currentYear}`,
-};
-
-async function fetchSearchContext(city, category) {
-  try {
-    const queryFn = SEARCH_QUERIES[category];
-    const q = queryFn ? queryFn(city) : `${city} ${category} ${currentYear}`;
-    const url = 'https://www.googleapis.com/customsearch/v1?key=' +
-      process.env.GOOGLE_SEARCH_KEY +
-      '&cx=' + process.env.GOOGLE_SEARCH_CX +
-      '&q=' + encodeURIComponent(q) +
-      '&num=5';
-    const response = await fetch(url);
-    const data = await response.json();
-    if (!data.items || data.items.length === 0) return '';
-    const results = data.items.map(item => `- ${item.title}: ${item.snippet}`).join('\n');
-    return `\n\nCURRENT WEB CONTEXT (use this to verify venues exist and are open, prefer this over your training data):\n${results}`;
-  } catch (e) {
-    return '';
-  }
+function ArtCard({ item, s, TURQUOISE, UNSPLASH_KEY }) {
+  const [imageUrl, setImageUrl] = useState(null);
+
+  useState(() => {
+    if (item.hiddenGem) return; // skip image fetch for hidden gems — Unsplash coverage is unreliable for obscure local pieces
+    const query = item.imageSearch || item.name + ' ' + (item.artist || '') + ' artwork';
+    fetch('https://api.unsplash.com/search/photos?query=' + encodeURIComponent(query) + '&per_page=1&orientation=landscape&client_id=' + UNSPLASH_KEY)
+      .then(r => r.json())
+      .then(d => { if (d.results && d.results.length > 0) setImageUrl(d.results[0].urls.regular); })
+      .catch(() => {});
+  }, []);
+
+  return (
+    <View style={s.card}>
+      {imageUrl && <Image source={{ uri: imageUrl }} style={s.cardImage} resizeMode="contain" />}
+      <Text style={s.cardTag}>{item.type || ''}</Text>
+      <Text style={s.cardName}>{item.name}</Text>
+      {item.artist && <Text style={s.cardMeta}>🎨 {item.artist}</Text>}
+      <Text style={s.cardDesc}>{item.description}</Text>
+      {item.hiddenGem && <Text style={s.badge}>💎 HIDDEN GEM</Text>}
+      {item.location && <Text style={s.cardMeta}>🏛️ {item.location}</Text>}
+      {item.neighbourhood && <Text style={s.cardMeta}>📍 {item.neighbourhood}</Text>}
+      {item.opens && <Text style={s.cardMeta}>🕐 {item.opens}</Text>}
+      {item.price && <Text style={s.cardMeta}>💰 {item.price}</Text>}
+      {item.localTip && <Text style={s.highlight}>💡 {item.localTip}</Text>}
+      {item.websiteSearch && (
+        <TouchableOpacity onPress={() => Linking.openURL('https://www.google.com/search?q=' + encodeURIComponent(item.websiteSearch))}>
+          <Text style={s.link}>🔗 Visit website</Text>
+        </TouchableOpacity>
+      )}
+    </View>
+  );
 }
 
-app.post('/claude', async (req, res) => {
-  try {
-    const response = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': process.env.ANTHROPIC_KEY,
-        'anthropic-version': '2023-06-01'
-      },
-      body: JSON.stringify(req.body)
-    });
-    const data = await response.json();
-    res.json(data);
-  } catch(e) {
-    res.status(500).json({ error: e.message });
+function extractJSON(text) {
+  // Strip markdown code fences first
+  let cleaned = text.replace(/```json|```/g, '').trim();
+  // If Claude added prose before/after the JSON, find the outermost {...} block
+  const firstBrace = cleaned.indexOf('{');
+  const lastBrace = cleaned.lastIndexOf('}');
+  if (firstBrace !== -1 && lastBrace !== -1 && lastBrace > firstBrace) {
+    cleaned = cleaned.substring(firstBrace, lastBrace + 1);
   }
-});
+  return JSON.parse(cleaned);
+}
 
-app.get('/search', async (req, res) => {
-  try {
-    const { q } = req.query;
-    if (!q) return res.status(400).json({ error: 'Missing query' });
-    const url = 'https://www.googleapis.com/customsearch/v1?key=' +
-      process.env.GOOGLE_SEARCH_KEY +
-      '&cx=' + process.env.GOOGLE_SEARCH_CX +
-      '&q=' + encodeURIComponent(q) +
-      '&num=5';
-    const response = await fetch(url);
-    const data = await response.json();
-    const results = (data.items || []).map(item => ({
-      title: item.title,
-      snippet: item.snippet,
-      link: item.link
-    }));
-    res.json({ results });
-  } catch(e) {
-    res.status(500).json({ error: e.message });
+export default function App() {
+  const [query, setQuery] = useState('');
+  const [city, setCity] = useState('');
+  const [searched, setSearched] = useState(false);
+  const [activeTab, setActiveTab] = useState(null);
+  const [myListVisible, setMyListVisible] = useState(false);
+  const [content, setContent] = useState([]);
+  const [noResultsNote, setNoResultsNote] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [suggestions, setSuggestions] = useState([]);
+  const [cityImage, setCityImage] = useState(null);
+  const [cityImageLoading, setCityImageLoading] = useState(false);
+  const [essentialsLoading, setEssentialsLoading] = useState(false);
+  const [cityTag, setCityTag] = useState('');
+  const [funFact, setFunFact] = useState('');
+  const [weather, setWeather] = useState(null);
+  const [currency, setCurrency] = useState(null);
+  const [dietaryFilter, setDietaryFilter] = useState('all');
+  const [preloadedContent, setPreloadedContent] = useState({});
+  const [preloadProgress, setPreloadProgress] = useState(0);
+  const [preloadComplete, setPreloadComplete] = useState(false);
+  const currentCityRef = useRef('');
+  const [savedItems, setSavedItems] = useState([]);
+  const [deviceId, setDeviceId] = useState(null);
+  const [feedbackVisible, setFeedbackVisible] = useState(false);
+  const [feedbackType, setFeedbackType] = useState(null);
+  const [feedbackText, setFeedbackText] = useState('');
+  const [feedbackSubmitting, setFeedbackSubmitting] = useState(false);
+  const [feedbackSubmitted, setFeedbackSubmitted] = useState(false);
+
+  function openFeedback() {
+    setFeedbackType(null);
+    setFeedbackText('');
+    setFeedbackSubmitted(false);
+    setFeedbackVisible(true);
   }
-});
 
-app.post('/recommendations', async (req, res) => {
-  try {
-    const { city, category } = req.body;
-    if (!city || !category) {
-      return res.status(400).json({ error: 'city and category are required' });
-    }
-
-    const cacheKey = city.trim().toLowerCase() + '|' + category;
-
-    // Check cache first (24 hour freshness window)
+  async function submitFeedback() {
+    if (!feedbackText.trim() || !feedbackType) return;
+    setFeedbackSubmitting(true);
     try {
-      const cacheCheck = await fetch(
-        SUPABASE_URL + '/rest/v1/recommendations_cache?cache_key=eq.' + encodeURIComponent(cacheKey) + '&select=*',
-        { headers: supabaseHeaders() }
-      );
-      const cached = await cacheCheck.json();
-      if (Array.isArray(cached) && cached[0]) {
-        const ageMs = Date.now() - new Date(cached[0].created_at).getTime();
-        const twentyFourHours = 24 * 60 * 60 * 1000;
-        if (ageMs < twentyFourHours) {
-          console.log('CACHE_HIT', cacheKey);
-          return res.json(cached[0].response_data);
-        }
-      }
-    } catch (e) {
-      // cache check failed, continue to generate fresh
-    }
-
-    console.log('CACHE_MISS', cacheKey);
-
-    if (category === 'essentials_info') {
-      const r = await fetch('https://api.anthropic.com/v1/messages', {
+      await fetch(BACKEND_URL + '/feedback', {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-api-key': process.env.ANTHROPIC_KEY,
-          'anthropic-version': '2023-06-01'
-        },
-        body: JSON.stringify({
-          model: 'claude-sonnet-4-6',
-          max_tokens: 500,
-          system: 'Return only valid JSON. No markdown, no backticks, no explanation.',
-          messages: [{ role: 'user', content: `For ${city} return JSON with: {"cityTag":"one evocative line capturing this city soul","funFact":"one genuinely surprising or delightful true fact about this city that most visitors do not know","weather":{"temp":"e.g. 28°C","condition":"sunny|cloudy|rainy|stormy","summary":"one line"},"currency":{"code":"e.g. EUR","symbol":"e.g. €","rate":"e.g. 1 USD = 0.92 EUR"}}` }]
-        })
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ device_id: deviceId, city, type: feedbackType, message: feedbackText.trim() })
+      });
+      setFeedbackSubmitted(true);
+      setFeedbackText('');
+      setTimeout(() => setFeedbackVisible(false), 1500);
+    } catch (e) {
+      // silently fail, could add an error state here later
+    }
+    setFeedbackSubmitting(false);
+  }
+
+  useEffect(() => {
+    async function initDevice() {
+      try {
+        let id = await AsyncStorage.getItem('localeDeviceId');
+        if (!id) {
+          id = 'device-' + Date.now() + '-' + Math.random().toString(36).substring(2, 15);
+          await AsyncStorage.setItem('localeDeviceId', id);
+        }
+        setDeviceId(id);
+        loadFavourites(id);
+      } catch (e) {
+        const fallbackId = 'device-' + Date.now() + '-' + Math.random().toString(36).substring(2, 15);
+        setDeviceId(fallbackId);
+      }
+    }
+    initDevice();
+  }, []);
+
+  async function loadFavourites(id) {
+    try {
+      const r = await fetch(BACKEND_URL + '/favourites?device_id=' + encodeURIComponent(id));
+      const data = await r.json();
+      if (Array.isArray(data)) setSavedItems(data);
+    } catch (e) {
+      // silently fail, favourites just won't load this session
+    }
+  }
+
+  function isItemSaved(item) {
+    return savedItems.some(s => s.item_name === item.name && s.city === city && s.category === activeTab);
+  }
+
+  async function toggleFavourite(item) {
+    const alreadySaved = savedItems.find(s => s.item_name === item.name && s.city === city && s.category === activeTab);
+    if (alreadySaved) {
+      setSavedItems(prev => prev.filter(s => s.id !== alreadySaved.id));
+      try {
+        await fetch(BACKEND_URL + '/favourites/' + alreadySaved.id, { method: 'DELETE' });
+      } catch (e) {}
+    } else {
+      const optimisticItem = { id: 'temp-' + Date.now(), device_id: deviceId, city, category: activeTab, item_name: item.name, item_data: item };
+      setSavedItems(prev => [...prev, optimisticItem]);
+      try {
+        const r = await fetch(BACKEND_URL + '/favourites', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ device_id: deviceId, city, category: activeTab, item_name: item.name, item_data: item })
+        });
+        const data = await r.json();
+        if (Array.isArray(data) && data[0]) {
+          setSavedItems(prev => prev.map(s => s.id === optimisticItem.id ? data[0] : s));
+        }
+      } catch (e) {}
+    }
+  }
+
+  async function removeSavedItem(savedEntry) {
+    setSavedItems(prev => prev.filter(s => s.id !== savedEntry.id));
+    try {
+      await fetch(BACKEND_URL + '/favourites/' + savedEntry.id, { method: 'DELETE' });
+    } catch (e) {}
+  }
+
+  async function shareItem(item, cityName) {
+    const parts = [
+      item.name + ' — ' + cityName,
+      item.description || '',
+      item.localTip ? 'Tip: ' + item.localTip : '',
+      'Found on Localé'
+    ].filter(Boolean);
+    try {
+      await Share.share({ message: parts.join('\n\n') });
+    } catch (e) {}
+  }
+
+  async function fetchSuggestions(text) {
+    try {
+      const r = await fetch(
+        'https://maps.googleapis.com/maps/api/place/autocomplete/json?input=' + encodeURIComponent(text) + '&types=(cities)&key=' + GOOGLE_KEY
+      );
+      const d = await r.json();
+      setSuggestions(d.predictions || []);
+    } catch(e) { setSuggestions([]); }
+  }
+
+  async function fetchCityImage(cityName) {
+    setCityImageLoading(true);
+    setCityImage(null);
+    try {
+      const r = await fetch(
+        'https://api.unsplash.com/search/photos?query=' + encodeURIComponent(cityName + ' city landmark skyline') + '&per_page=1&orientation=landscape&client_id=' + UNSPLASH_KEY
+      );
+      const d = await r.json();
+      if (d.results && d.results.length > 0) setCityImage(d.results[0].urls.regular);
+    } catch(e) { setCityImage(null); }
+    setCityImageLoading(false);
+  }
+
+  async function fetchEssentials(cityName) {
+    setEssentialsLoading(true);
+    try {
+      const r = await fetch(BACKEND_URL + '/recommendations', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ city: cityName, category: 'essentials_info' })
       });
       const d = await r.json();
-      saveToCache(cacheKey, d);
-      return res.json(d);
-    }
-
-    const promptFn = PROMPTS[category];
-    if (!promptFn) {
-      return res.status(400).json({ error: 'Unknown category: ' + category });
-    }
-
-    const searchContext = await fetchSearchContext(city, category);
-    const response = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': process.env.ANTHROPIC_KEY,
-        'anthropic-version': '2023-06-01'
-      },
-      body: JSON.stringify({
-        model: 'claude-sonnet-4-6',
-        max_tokens: 8000,
-        system: [
-          {
-            type: 'text',
-            text: MASTER_SYSTEM,
-            cache_control: { type: 'ephemeral' }
-          },
-          {
-            type: 'text',
-            text: 'Return only valid JSON. No markdown, no backticks, no explanation. Do not add any text, notes, or commentary before or after the JSON object — including notes about items you excluded or chose not to include. If you have low confidence in finding genuine results for this city/category, or can only confidently verify a small number of items, include a "note" field at the top level of the JSON object (alongside "items") explaining this briefly and honestly to the traveller — for example: {"note":"Only one coffee shop could be confidently verified as currently open in this town — fewer options exist here than in larger cities.","items":[...]}. Never write this explanation as plain text outside the JSON object.'
-          }
-        ],
-        messages: [{ role: 'user', content: PROMPTS[category](city) + searchContext }]
-      })
-    });
-    const data = await response.json();
-    saveToCache(cacheKey, data);
-    res.json(data);
-  } catch(e) {
-    res.status(500).json({ error: e.message });
+      const j = extractJSON(d.content[0].text);
+      setCityTag(j.cityTag || '');
+      setFunFact(j.funFact || '');
+      setWeather(j.weather || null);
+      setCurrency(j.currency || null);
+    } catch(e) { setCityTag(''); }
+    setEssentialsLoading(false);
   }
-});
 
-async function saveToCache(cacheKey, responseData) {
-  try {
-    const r = await fetch(SUPABASE_URL + '/rest/v1/recommendations_cache', {
-      method: 'POST',
-      headers: { 
-        ...supabaseHeaders(), 
-        'Prefer': 'return=minimal,resolution=merge-duplicates',
-        'on-conflict': 'cache_key'
-      },
-      body: JSON.stringify({ cache_key: cacheKey, response_data: responseData, created_at: new Date().toISOString() })
-    });
-    if (!r.ok) {
-      const err = await r.text();
-      console.error('Cache save failed:', r.status, err);
-    }
-  } catch (e) {
-    console.error('Cache save error:', e.message);
+  async function preloadAllTabs(cityName) {
+    if (!PRELOAD_ENABLED) return;
+    currentCityRef.current = cityName;
+    setPreloadedContent({});
+    setPreloadProgress(0);
+    setPreloadComplete(false);
+    await Promise.all(PRELOAD_CATEGORIES.map(async (category) => {
+      try {
+        const r = await fetch(BACKEND_URL + '/recommendations', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ city: cityName, category })
+        });
+        const d = await r.json();
+        const j = extractJSON(d.content[0].text);
+        if (currentCityRef.current !== cityName) return; // user searched a different city since this request started
+        setPreloadedContent(prev => ({
+          ...prev,
+          [category]: { items: j.items || [], note: j.note || '' }
+        }));
+        setPreloadProgress(prev => prev + 1);
+      } catch (e) {
+        if (currentCityRef.current === cityName) setPreloadProgress(prev => prev + 1);
+        // silently skip — loadTab will fall back to a fresh fetch if this category never lands
+      }
+    }));
+    if (currentCityRef.current === cityName) setPreloadComplete(true);
   }
-}
 
-const PORT = process.env.PORT || 3001;
-
-app.post('/favourites', async (req, res) => {
-  try {
-    const { device_id, city, category, item_name, item_data } = req.body;
-    if (!device_id || !city || !category || !item_name) {
-      return res.status(400).json({ error: 'device_id, city, category, item_name are required' });
-    }
-    const r = await fetch(SUPABASE_URL + '/rest/v1/favourites', {
-      method: 'POST',
-      headers: { ...supabaseHeaders(), 'Prefer': 'return=representation' },
-      body: JSON.stringify({ device_id, city, category, item_name, item_data })
-    });
-    const data = await r.json();
-    res.json(data);
-  } catch(e) {
-    res.status(500).json({ error: e.message });
+  async function search() {
+    if (!query.trim()) return;
+    Keyboard.dismiss();
+    setCity(query);
+    setSearched(true);
+    setActiveTab(null);
+    setContent([]);
+    setSuggestions([]);
+    setCityImage(null);
+    setCityTag('');
+    setFunFact('');
+    setWeather(null);
+    setCurrency(null);
+    setDietaryFilter('all');
+    fetchCityImage(query);
+    fetchEssentials(query);
+    preloadAllTabs(query);
   }
-});
 
-app.get('/favourites', async (req, res) => {
-  try {
-    const { device_id } = req.query;
-    if (!device_id) return res.status(400).json({ error: 'device_id is required' });
-    const r = await fetch(
-      SUPABASE_URL + '/rest/v1/favourites?device_id=eq.' + encodeURIComponent(device_id) + '&order=created_at.desc',
-      { headers: supabaseHeaders() }
+  async function loadTab(key) {
+    setActiveTab(key);
+    setNoResultsNote('');
+    setDietaryFilter('all');
+
+    if (PRELOAD_ENABLED && preloadedContent[key]) {
+      setContent(preloadedContent[key].items);
+      if (preloadedContent[key].items.length === 0 && preloadedContent[key].note) {
+        setNoResultsNote(preloadedContent[key].note);
+      }
+      setLoading(false);
+      return;
+    }
+
+    setLoading(true);
+    setContent([]);
+    try {
+      const r = await fetch(BACKEND_URL + '/recommendations', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ city: city, category: key })
+      });
+      const d = await r.json();
+      const j = extractJSON(d.content[0].text);
+      setContent(j.items || []);
+      if ((!j.items || j.items.length === 0) && j.note) {
+        setNoResultsNote(j.note);
+      }
+    } catch(e) { setContent([]); }
+    setLoading(false);
+  }
+
+  const weatherIcon = (condition) => {
+    if (!condition) return '🌤️';
+    if (condition === 'sunny') return '☀️';
+    if (condition === 'cloudy') return '⛅';
+    if (condition === 'rainy') return '🌧️';
+    if (condition === 'stormy') return '⛈️';
+    return '🌤️';
+  };
+
+  const filteredContent = activeTab === 'eating' && dietaryFilter !== 'all'
+    ? content.filter(item => item.dietary && item.dietary.includes(dietaryFilter))
+    : content;
+
+  if (myListVisible) {
+    const groupedByCity = savedItems.reduce((acc, entry) => {
+      if (!acc[entry.city]) acc[entry.city] = [];
+      acc[entry.city].push(entry);
+      return acc;
+    }, {});
+    const cities = Object.keys(groupedByCity);
+
+    return (
+      <ScrollView style={s.bg} keyboardShouldPersistTaps="handled">
+        <TouchableOpacity onPress={() => setMyListVisible(false)} style={s.back}>
+          <Text style={s.backText}>← Back</Text>
+        </TouchableOpacity>
+        <Text style={s.tabTitle}>❤️ My List</Text>
+
+        {cities.length === 0 && (
+          <Text style={s.empty}>Nothing saved yet — tap the heart on anything you love.</Text>
+        )}
+
+        {cities.map((cityName) => (
+          <View key={cityName} style={{ marginBottom: 24 }}>
+            <Text style={s.myListCityHeader}>{cityName}</Text>
+            {groupedByCity[cityName].map((entry) => {
+              const cat = CATEGORIES.find(c => c.key === entry.category);
+              const item = entry.item_data || {};
+              return (
+                <View key={entry.id} style={s.card}>
+                  <Text style={s.cardTag}>{cat ? cat.icon + ' ' + cat.label : entry.category}</Text>
+                  <View style={s.cardNameRow}>
+                    <Text style={s.cardName}>{entry.item_name}</Text>
+                    <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+                      <TouchableOpacity onPress={() => shareItem(item, cityName)} style={s.heartBtn}>
+                        <Text style={s.heartIcon}>📤</Text>
+                      </TouchableOpacity>
+                      <TouchableOpacity onPress={() => removeSavedItem(entry)} style={s.heartBtn}>
+                        <Text style={s.heartIcon}>❤️</Text>
+                      </TouchableOpacity>
+                    </View>
+                  </View>
+                  {item.description && <Text style={s.cardDesc}>{item.description}</Text>}
+                  {item.localTip && <Text style={s.highlight}>💡 {item.localTip}</Text>}
+                </View>
+              );
+            })}
+          </View>
+        ))}
+      </ScrollView>
     );
-    const data = await r.json();
-    res.json(data);
-  } catch(e) {
-    res.status(500).json({ error: e.message });
   }
-});
 
-app.delete('/favourites/:id', async (req, res) => {
-  try {
-    const { id } = req.params;
-    const r = await fetch(SUPABASE_URL + '/rest/v1/favourites?id=eq.' + encodeURIComponent(id), {
-      method: 'DELETE',
-      headers: supabaseHeaders()
-    });
-    res.json({ deleted: true });
-  } catch(e) {
-    res.status(500).json({ error: e.message });
-  }
-});
+  if (activeTab) {
+    const cat = CATEGORIES.find(c => c.key === activeTab);
 
-app.post('/feedback', async (req, res) => {
-  try {
-    const { device_id, city, type, message } = req.body;
-    if (!city || !type || !message) {
-      return res.status(400).json({ error: 'city, type, message are required' });
+    if (loading && cityImage) {
+      return (
+        <ImageBackground source={{ uri: cityImage }} style={{ flex: 1 }}>
+          <View style={{ flex: 1, backgroundColor: 'rgba(0,0,0,0.5)', justifyContent: 'center', alignItems: 'center' }}>
+            <Text style={{ fontSize: 36, fontWeight: '700', color: WHITE, marginBottom: 8 }}>{city}</Text>
+            <Text style={{ fontSize: 20, color: 'rgba(255,255,255,0.9)', marginBottom: 40 }}>{cat.icon} {cat.label}</Text>
+            <ActivityIndicator size="large" color={WHITE} />
+            <Text style={{ color: 'rgba(255,255,255,0.7)', marginTop: 16, fontSize: 14 }}>Finding local knowledge...</Text>
+          </View>
+          <Modal visible={feedbackVisible} transparent animationType="slide" onRequestClose={() => setFeedbackVisible(false)}>
+            <KeyboardAvoidingView style={{flex:1}} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
+              <View style={s.modalOverlay}>
+                <View style={s.modalCard}>
+                {feedbackSubmitted ? (
+                  <Text style={s.modalThanks}>Thanks for sharing! 🧿</Text>
+                ) : !feedbackType ? (
+                  <>
+                    <Text style={s.modalTitle}>Share your local tip</Text>
+                    <Text style={s.modalSubtitle}>{city}</Text>
+                    <TouchableOpacity style={s.modalOption} onPress={() => setFeedbackType('loved')}>
+                      <Text style={s.modalOptionText}>❤️ What do you love about this city?</Text>
+                    </TouchableOpacity>
+                    <TouchableOpacity style={s.modalOption} onPress={() => setFeedbackType('suggestion')}>
+                      <Text style={s.modalOptionText}>💡 Secret local tip for Localé travellers</Text>
+                    </TouchableOpacity>
+                    <TouchableOpacity style={s.modalCancel} onPress={() => setFeedbackVisible(false)}>
+                      <Text style={s.modalCancelText}>Cancel</Text>
+                    </TouchableOpacity>
+                  </>
+                ) : (
+                  <>
+                    <Text style={s.modalTitle}>
+                      {feedbackType === 'loved' ? '❤️ What do you love?' : '💡 Your suggestion'}
+                    </Text>
+                    <Text style={s.modalSubtitle}>{city}</Text>
+                    <TextInput
+                      style={s.modalInput}
+                      multiline
+                      numberOfLines={4}
+                      placeholder="Type here..."
+                      placeholderTextColor={GREY}
+                      value={feedbackText}
+                      onChangeText={setFeedbackText}
+                    />
+                    <TouchableOpacity
+                      style={[s.modalSubmit, (!feedbackText.trim() || feedbackSubmitting) && s.modalSubmitDisabled]}
+                      onPress={submitFeedback}
+                      disabled={!feedbackText.trim() || feedbackSubmitting}
+                    >
+                      <Text style={s.modalSubmitText}>{feedbackSubmitting ? 'Sending...' : 'Submit'}</Text>
+                    </TouchableOpacity>
+                    <TouchableOpacity style={s.modalCancel} onPress={() => setFeedbackType(null)}>
+                      <Text style={s.modalCancelText}>Back</Text>
+                    </TouchableOpacity>
+                  </>
+                )}
+              </View>
+            </View>
+            </KeyboardAvoidingView>
+          </Modal>
+        </ImageBackground>
+      );
     }
-    if (type !== 'loved' && type !== 'suggestion') {
-      return res.status(400).json({ error: 'type must be loved or suggestion' });
-    }
-    const r = await fetch(SUPABASE_URL + '/rest/v1/feedback', {
-      method: 'POST',
-      headers: { ...supabaseHeaders(), 'Prefer': 'return=representation' },
-      body: JSON.stringify({ device_id, city, type, message })
-    });
-    const data = await r.json();
-    res.json(data);
-  } catch(e) {
-    res.status(500).json({ error: e.message });
-  }
-});
 
-async function pingSupabase() {
-  try {
-    await fetch(SUPABASE_URL + '/rest/v1/keepalive', {
-      method: 'POST',
-      headers: { ...supabaseHeaders(), 'Prefer': 'return=minimal' },
-      body: JSON.stringify({})
-    });
-    console.log('Supabase keepalive ping sent');
-  } catch (e) {
-    console.log('Supabase keepalive ping failed:', e.message);
+    return (
+      <ScrollView style={s.bg} keyboardShouldPersistTaps="handled">
+        <TouchableOpacity onPress={() => setActiveTab(null)} style={s.back}>
+          <Text style={s.backText}>← {city}</Text>
+        </TouchableOpacity>
+        <Text style={s.tabTitle}>{cat.icon} {cat.label}</Text>
+
+        {loading && <ActivityIndicator size="large" color={TURQUOISE} style={{marginTop:40}} />}
+        {!loading && filteredContent.length === 0 && (
+          <Text style={s.empty}>
+            {noResultsNote
+              ? noResultsNote
+              : dietaryFilter !== 'all' ? 'No ' + dietaryFilter + ' options found' : 'No results found for ' + city}
+          </Text>
+        )}
+        {!loading && filteredContent.map((item, i) => (
+          activeTab === 'art' ? (
+            <ArtCard key={i} item={item} s={s} TURQUOISE={TURQUOISE} UNSPLASH_KEY={UNSPLASH_KEY} />
+          ) : (
+          <View key={i} style={s.card}>
+            <Text style={s.cardTag}>{item.type || item.artist || item.vibe || item.when || item.section || ''}</Text>
+            <View style={s.cardNameRow}>
+              <Text style={s.cardName}>{item.name}</Text>
+              <TouchableOpacity onPress={() => shareItem(item, city)} style={s.heartBtn}>
+                <Text style={s.heartIcon}>📤</Text>
+              </TouchableOpacity>
+              <TouchableOpacity onPress={() => toggleFavourite(item)} style={s.heartBtn}>
+                <Text style={s.heartIcon}>{isItemSaved(item) ? '❤️' : '🤍'}</Text>
+              </TouchableOpacity>
+            </View>
+            <Text style={s.cardDesc}>{item.description}</Text>
+            {item.earlyBird && <Text style={s.badge}>⭐ EARLY BIRD — open before 8am</Text>}
+            {item.hiddenGem && <Text style={s.badge}>💎 HIDDEN GEM</Text>}
+            {item.isFree && <Text style={s.badge}>🎉 FREE</Text>}
+            {item.opens && <Text style={s.cardMeta}>🕐 {item.opens}</Text>}
+            {item.price && activeTab !== 'coffee' && activeTab !== 'events' && <Text style={s.cardMeta}>💰 {item.price}</Text>}
+            {item.orderThis && <Text style={s.cardMeta}>🍽️ Order: {item.orderThis}</Text>}
+            {item.mustOrder && <Text style={s.cardMeta}>🍽️ Must order: {item.mustOrder}</Text>}
+            {item.bestTime && <Text style={s.cardMeta}>⏰ {item.bestTime}</Text>}
+            {item.when && <Text style={s.cardMeta}>📅 {item.when}</Text>}
+            {item.duration && <Text style={s.cardMeta}>⏱️ {item.duration}</Text>}
+            {item.distance && <Text style={s.cardMeta}>📏 {item.distance}</Text>}
+            {item.where && <Text style={s.cardMeta}>📍 {item.where}</Text>}
+            {item.location && <Text style={s.cardMeta}>🏛️ {item.location}</Text>}
+            {item.neighbourhood && <Text style={s.cardMeta}>📍 {item.neighbourhood}</Text>}
+            {item.venue && <Text style={s.cardMeta}>🏟️ {item.venue}</Text>}
+            {item.buyThis && <Text style={s.cardMeta}>🛍️ Buy: {item.buyThis}</Text>}
+            {item.onlyHereReason && <Text style={s.highlight}>🌍 {item.onlyHereReason}</Text>}
+            {item.localSecret && <Text style={s.highlight}>🔑 {item.localSecret}</Text>}
+            {item.surprise && <Text style={s.highlight}>✨ {item.surprise}</Text>}
+            {item.localTip && <Text style={s.highlight}>💡 {item.localTip}</Text>}
+            {item.dietary && item.dietary.length > 0 && (
+              <View style={s.dietaryRow}>
+                {item.dietary.map((d, di) => (
+                  <View key={di} style={s.dietaryTag}>
+                    <Text style={s.dietaryText}>
+                      {d === 'vegetarian' ? '🌱 Veg' :
+                       d === 'vegan' ? '🌿 Vegan' :
+                       d === 'halal' ? '☪️ Halal' :
+                       d === 'kosher' ? '✡️ Kosher' :
+                       d === 'pescatarian' ? '🐟 Pesc' :
+                       d === 'glutenfree' ? '🌾 GF' : d}
+                    </Text>
+                  </View>
+                ))}
+              </View>
+            )}
+            {item.websiteSearch && (
+              <TouchableOpacity onPress={() => Linking.openURL('https://www.google.com/search?q=' + encodeURIComponent(item.websiteSearch))}>
+                <Text style={s.link}>🔗 Visit website</Text>
+              </TouchableOpacity>
+            )}
+            {item.mapSearch && (
+              <TouchableOpacity onPress={() => Linking.openURL('https://maps.google.com/?q=' + encodeURIComponent(item.mapSearch))}>
+                <Text style={s.link}>🗺️ View on map</Text>
+              </TouchableOpacity>
+            )}
+            {item.bookingSearch && (
+              <TouchableOpacity onPress={() => Linking.openURL('https://www.google.com/search?q=' + encodeURIComponent(item.bookingSearch + ' tickets'))}>
+                <Text style={s.link}>🎟️ Get tickets</Text>
+              </TouchableOpacity>
+            )}
+          </View>
+          )
+        ))}
+
+        <TouchableOpacity style={s.tabFloatingBtn} onPress={openFeedback}>
+          <Text style={s.floatingBtnText}>📍 Share your local tip</Text>
+        </TouchableOpacity>
+
+        <Modal visible={feedbackVisible} transparent animationType="slide" onRequestClose={() => setFeedbackVisible(false)}>
+          <KeyboardAvoidingView style={{flex:1}} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
+            <View style={s.modalOverlay}>
+              <View style={s.modalCard}>
+              {feedbackSubmitted ? (
+                <Text style={s.modalThanks}>Thanks for sharing! 🧿</Text>
+              ) : !feedbackType ? (
+                <>
+                  <Text style={s.modalTitle}>Share your local tip</Text>
+                  <Text style={s.modalSubtitle}>{city}</Text>
+                  <TouchableOpacity style={s.modalOption} onPress={() => setFeedbackType('loved')}>
+                    <Text style={s.modalOptionText}>❤️ What do you love about this city?</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity style={s.modalOption} onPress={() => setFeedbackType('suggestion')}>
+                    <Text style={s.modalOptionText}>💡 Secret local tip for Localé travellers</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity style={s.modalCancel} onPress={() => setFeedbackVisible(false)}>
+                    <Text style={s.modalCancelText}>Cancel</Text>
+                  </TouchableOpacity>
+                </>
+              ) : (
+                <>
+                  <Text style={s.modalTitle}>
+                    {feedbackType === 'loved' ? '❤️ What do you love?' : '💡 Your suggestion'}
+                  </Text>
+                  <Text style={s.modalSubtitle}>{city}</Text>
+                  <TextInput
+                    style={s.modalInput}
+                    multiline
+                    numberOfLines={4}
+                    placeholder="Type here..."
+                    placeholderTextColor={GREY}
+                    value={feedbackText}
+                    onChangeText={setFeedbackText}
+                  />
+                  <TouchableOpacity
+                    style={[s.modalSubmit, (!feedbackText.trim() || feedbackSubmitting) && s.modalSubmitDisabled]}
+                    onPress={submitFeedback}
+                    disabled={!feedbackText.trim() || feedbackSubmitting}
+                  >
+                    <Text style={s.modalSubmitText}>{feedbackSubmitting ? 'Sending...' : 'Submit'}</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity style={s.modalCancel} onPress={() => setFeedbackType(null)}>
+                    <Text style={s.modalCancelText}>Back</Text>
+                  </TouchableOpacity>
+                </>
+              )}
+            </View>
+          </View>
+          </KeyboardAvoidingView>
+        </Modal>
+      </ScrollView>
+    );
   }
+
+  return (
+    <ScrollView style={s.bg} keyboardShouldPersistTaps="handled">
+      <View style={s.hero}>
+        <Text style={s.logo}>Localé</Text>
+        <Text style={s.tagline}>... see the City like a Local!</Text>
+      </View>
+
+      <View>
+        <View style={s.searchRow}>
+          <View style={s.inputWrapper}>
+            <TextInput
+              style={s.input}
+              placeholder="Enter a city..."
+              placeholderTextColor={GREY}
+              value={query}
+              onChangeText={(text) => {
+                setQuery(text);
+                if (text.length > 2) fetchSuggestions(text);
+                else setSuggestions([]);
+              }}
+              onSubmitEditing={search}
+              returnKeyType="search"
+            />
+            {query.length > 0 && (
+              <TouchableOpacity style={s.clearBtn} onPress={() => { setQuery(''); setSuggestions([]); setSearched(false); }}>
+                <Text style={s.clearBtnText}>✕</Text>
+              </TouchableOpacity>
+            )}
+          </View>
+          <TouchableOpacity style={s.btn} onPress={search}>
+            <Text style={s.btnT}>Go</Text>
+          </TouchableOpacity>
+        </View>
+        {suggestions.length > 0 && (
+          <View style={s.suggestions}>
+            {suggestions.map((item, i) => (
+              <TouchableOpacity
+                key={i}
+                style={s.suggestionItem}
+                onPress={() => { setQuery(item.description); setSuggestions([]); Keyboard.dismiss(); }}>
+                <Text style={s.suggestionText}>📍 {item.description}</Text>
+              </TouchableOpacity>
+            ))}
+          </View>
+        )}
+
+        <TouchableOpacity style={s.myListBtn} onPress={() => setMyListVisible(true)}>
+          <Text style={s.myListBtnText}>❤️ My List</Text>
+        </TouchableOpacity>
+      </View>
+
+      {searched && (
+        <View>
+          {(cityImageLoading || essentialsLoading || (PRELOAD_ENABLED && !preloadComplete)) ? (
+            <View style={s.cityPlaceholder}>
+              <EyeLoader size={64} progress={PRELOAD_CATEGORIES.length ? preloadProgress / PRELOAD_CATEGORIES.length : 1} />
+              <Text style={s.cityPlaceholderText}>Finding authentic local spots — this takes a few seconds the first time</Text>
+              {funFact ? <Text style={s.funFactText}>🧿 {funFact}</Text> : null}
+            </View>
+          ) : cityImage ? (
+            <ImageBackground
+              source={{ uri: cityImage }}
+              style={s.cityBg}
+              imageStyle={{ borderRadius: 16 }}>
+              <View style={s.cityOverlay}>
+                <View style={s.cityTopRow}>
+                  <View style={s.cityNameBlock}>
+                    <Text style={s.cityLabelWhite}>{city}</Text>
+                    {cityTag ? <Text style={s.cityTagWhite}>{cityTag}</Text> : null}
+                  </View>
+                  <View style={s.cityIcons}>
+                    {weather && (
+                      <View>
+                        <Text style={s.weatherIcon}>{weatherIcon(weather.condition)}</Text>
+                        <Text style={s.weatherTemp}>{weather.temp}</Text>
+                      </View>
+                    )}
+                    {currency && (
+                      <TouchableOpacity
+                        style={s.currencyBtn}
+                        onPress={() => Linking.openURL('https://www.xe.com/currencyconverter/convert/?Amount=1&From=USD&To=' + currency.code)}>
+                        <Text style={s.currencySymbol}>{currency.symbol}</Text>
+                      </TouchableOpacity>
+                    )}
+                  </View>
+                </View>
+              </View>
+            </ImageBackground>
+          ) : (
+            <View style={s.cityBgFallback}>
+              <View style={s.cityTopRow}>
+                <View style={s.cityNameBlock}>
+                  <Text style={s.cityLabel}>{city}</Text>
+                  {cityTag ? <Text style={s.cityTagDark}>{cityTag}</Text> : null}
+                </View>
+                <View style={s.cityIcons}>
+                  {weather && (
+                    <View>
+                      <Text style={s.weatherIconDark}>{weatherIcon(weather.condition)}</Text>
+                      <Text style={s.weatherTempDark}>{weather.temp}</Text>
+                    </View>
+                  )}
+                  {currency && (
+                    <TouchableOpacity
+                      style={s.currencyBtnDark}
+                      onPress={() => Linking.openURL('https://www.xe.com/currencyconverter/convert/?Amount=1&From=USD&To=' + currency.code)}>
+                      <Text style={s.currencySymbolDark}>{currency.symbol}</Text>
+                    </TouchableOpacity>
+                  )}
+                </View>
+              </View>
+            </View>
+          )}
+
+          <View style={s.grid}>
+            {CATEGORIES.map(cat => (
+              <Pressable key={cat.key} style={s.catCard} onPress={() => loadTab(cat.key)}>
+                <Text style={s.catIcon}>{cat.icon}</Text>
+                <Text style={s.catLabel}>{cat.label}</Text>
+                <Text style={s.catTeaser}>{cat.teaser}</Text>
+              </Pressable>
+            ))}
+          </View>
+
+          <TouchableOpacity style={s.floatingBtn} onPress={openFeedback}>
+            <Text style={s.floatingBtnText}>📍 Share your local tip</Text>
+          </TouchableOpacity>
+        </View>
+      )}
+
+      <Modal visible={feedbackVisible} transparent animationType="slide" onRequestClose={() => setFeedbackVisible(false)}>
+        <KeyboardAvoidingView style={{flex:1}} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
+          <View style={s.modalOverlay}>
+            <View style={s.modalCard}>
+            {feedbackSubmitted ? (
+              <Text style={s.modalThanks}>Thanks for sharing! 🧿</Text>
+            ) : !feedbackType ? (
+              <>
+                <Text style={s.modalTitle}>Share your local tip</Text>
+                <Text style={s.modalSubtitle}>{city}</Text>
+                <TouchableOpacity style={s.modalOption} onPress={() => setFeedbackType('loved')}>
+                  <Text style={s.modalOptionText}>❤️ What do you love about this city?</Text>
+                </TouchableOpacity>
+                <TouchableOpacity style={s.modalOption} onPress={() => setFeedbackType('suggestion')}>
+                  <Text style={s.modalOptionText}>💡 Secret local tip for Localé travellers</Text>
+                </TouchableOpacity>
+                <TouchableOpacity style={s.modalCancel} onPress={() => setFeedbackVisible(false)}>
+                  <Text style={s.modalCancelText}>Cancel</Text>
+                </TouchableOpacity>
+              </>
+            ) : (
+              <>
+                <Text style={s.modalTitle}>
+                  {feedbackType === 'loved' ? '❤️ What do you love?' : '💡 Your suggestion'}
+                </Text>
+                <Text style={s.modalSubtitle}>{city}</Text>
+                <TextInput
+                  style={s.modalInput}
+                  multiline
+                  numberOfLines={4}
+                  placeholder="Type here..."
+                  placeholderTextColor={GREY}
+                  value={feedbackText}
+                  onChangeText={setFeedbackText}
+                />
+                <TouchableOpacity
+                  style={[s.modalSubmit, (!feedbackText.trim() || feedbackSubmitting) && s.modalSubmitDisabled]}
+                  onPress={submitFeedback}
+                  disabled={!feedbackText.trim() || feedbackSubmitting}
+                >
+                  <Text style={s.modalSubmitText}>{feedbackSubmitting ? 'Sending...' : 'Submit'}</Text>
+                </TouchableOpacity>
+                <TouchableOpacity style={s.modalCancel} onPress={() => setFeedbackType(null)}>
+                  <Text style={s.modalCancelText}>Back</Text>
+                </TouchableOpacity>
+              </>
+            )}
+          </View>
+        </View>
+        </KeyboardAvoidingView>
+      </Modal>
+    </ScrollView>
+  );
 }
 
-// Ping every 3 days to prevent Supabase free tier pausing after 7 days inactivity
-setInterval(pingSupabase, 3 * 24 * 60 * 60 * 1000);
-pingSupabase();
-
-app.listen(PORT, () => console.log('Locale backend running on port ' + PORT));
+const s = StyleSheet.create({
+  bg: { flex: 1, backgroundColor: BG, padding: 20 },
+  hero: { alignItems: 'center', marginTop: 60, marginBottom: 30 },
+  logo: { fontSize: 48, fontWeight: '700', color: TURQUOISE, letterSpacing: -1 },
+  tagline: { fontSize: 16, color: GREY, fontStyle: 'italic', marginTop: 4 },
+  searchRow: { flexDirection: 'row', gap: 10, marginBottom: 4 },
+  inputWrapper: { flex: 1, position: 'relative', justifyContent: 'center' },
+  input: {
+    backgroundColor: WHITE, borderRadius: 12,
+    padding: 14, paddingRight: 40, fontSize: 16, borderWidth: 1.5,
+    borderColor: '#d0f0f5', color: DARK
+  },
+  clearBtn: { position: 'absolute', right: 12, padding: 4 },
+  clearBtnText: { fontSize: 14, color: GREY, fontWeight: '700' },
+  btn: { backgroundColor: TURQUOISE, borderRadius: 12, paddingHorizontal: 22, justifyContent: 'center' },
+  btnT: { color: WHITE, fontWeight: '700', fontSize: 16 },
+  suggestions: { backgroundColor: WHITE, borderRadius: 12, marginBottom: 12, borderWidth: 1, borderColor: '#d0f0f5', overflow: 'hidden' },
+  suggestionItem: { padding: 14, borderBottomWidth: 1, borderBottomColor: '#f0f0f0' },
+  suggestionText: { fontSize: 14, color: DARK },
+  myListBtn: { alignSelf: 'center', marginTop: 12, marginBottom: 8, paddingVertical: 8, paddingHorizontal: 18, borderRadius: 20, backgroundColor: WHITE, borderWidth: 1, borderColor: '#d0f0f5' },
+  myListBtnText: { fontSize: 14, color: TURQUOISE, fontWeight: '700' },
+  cityPlaceholder: { width: '100%', minHeight: 140, marginBottom: 20, marginTop: 16, backgroundColor: '#d0f0f5', borderRadius: 16, justifyContent: 'center', alignItems: 'center', gap: 10, padding: 20 },
+  cityPlaceholderText: { fontSize: 14, color: TURQUOISE, fontWeight: '600', textAlign: 'center' },
+  funFactText: { fontSize: 13, color: DARK, fontStyle: 'italic', textAlign: 'center', marginTop: 4, paddingHorizontal: 8 },
+  cityBg: { width: '100%', height: 200, marginBottom: 20, marginTop: 16 },
+  cityBgFallback: { marginBottom: 20, marginTop: 16, padding: 16 },
+  cityOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.4)', borderRadius: 16, padding: 20, justifyContent: 'flex-end' },
+  cityTopRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-end' },
+  cityNameBlock: { flex: 1 },
+  cityLabelWhite: { fontSize: 32, fontWeight: '700', color: WHITE },
+  cityTagWhite: { fontSize: 13, color: 'rgba(255,255,255,0.9)', fontStyle: 'italic', marginTop: 2 },
+  cityLabel: { fontSize: 32, fontWeight: '700', color: DARK },
+  cityTagDark: { fontSize: 13, color: TURQUOISE, fontStyle: 'italic', marginTop: 2 },
+  cityIcons: { alignItems: 'flex-end', gap: 8 },
+  weatherIcon: { fontSize: 24, textAlign: 'center' },
+  weatherTemp: { fontSize: 12, color: WHITE, textAlign: 'center', fontWeight: '600' },
+  weatherIconDark: { fontSize: 24, textAlign: 'center' },
+  weatherTempDark: { fontSize: 12, color: DARK, textAlign: 'center', fontWeight: '600' },
+  currencyBtn: { backgroundColor: 'rgba(255,255,255,0.25)', borderRadius: 8, padding: 6, alignItems: 'center' },
+  currencyBtnDark: { backgroundColor: TURQUOISE, borderRadius: 8, padding: 6, alignItems: 'center' },
+  currencySymbol: { fontSize: 16, fontWeight: '700', color: WHITE },
+  currencySymbolDark: { fontSize: 16, fontWeight: '700', color: WHITE },
+  grid: { flexDirection: 'row', flexWrap: 'wrap', gap: 12 },
+  catCard: {
+    backgroundColor: WHITE, borderRadius: 16, padding: 16, width: '47%',
+    shadowColor: '#000', shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.08, shadowRadius: 8, elevation: 3,
+    borderLeftWidth: 3, borderLeftColor: TURQUOISE,
+  },
+  catIcon: { fontSize: 28, marginBottom: 8 },
+  catLabel: { fontSize: 15, fontWeight: '700', color: DARK, marginBottom: 4 },
+  catTeaser: { fontSize: 12, color: GREY, lineHeight: 16 },
+  floatingBtn: {
+    backgroundColor: TURQUOISE, borderRadius: 30, paddingVertical: 14,
+    paddingHorizontal: 24, alignItems: 'center', marginTop: 24, marginBottom: 40,
+    shadowColor: '#000', shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.15, shadowRadius: 8, elevation: 6,
+  },
+  floatingBtnText: { color: WHITE, fontWeight: '700', fontSize: 15 },
+  back: { marginBottom: 20, marginTop: 8, padding: 12, backgroundColor: WHITE, borderRadius: 10, borderWidth: 1, borderColor: '#d0f0f5' },
+  backText: { color: TURQUOISE, fontSize: 16, fontWeight: '700' },
+  tabTitle: { fontSize: 26, fontWeight: '700', color: DARK, marginBottom: 16 },
+  myListCityHeader: { fontSize: 18, fontWeight: '700', color: TURQUOISE, marginBottom: 10, textTransform: 'capitalize' },
+  filterRow: { marginBottom: 16 },
+  filterBtn: { paddingHorizontal: 14, paddingVertical: 8, borderRadius: 20, backgroundColor: WHITE, borderWidth: 1, borderColor: '#d0f0f5', marginRight: 8 },
+  filterBtnActive: { backgroundColor: TURQUOISE, borderColor: TURQUOISE },
+  filterText: { fontSize: 13, color: GREY, fontWeight: '500' },
+  filterTextActive: { color: WHITE },
+  card: {
+    backgroundColor: WHITE, borderRadius: 14, padding: 16,
+    marginBottom: 12, borderLeftWidth: 3, borderLeftColor: TURQUOISE,
+    shadowColor: '#000', shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.06, shadowRadius: 6, elevation: 2,
+  },
+  cardImage: { width: '100%', height: 180, borderRadius: 10, marginBottom: 12, backgroundColor: '#f0f0f0' },
+  cardNameRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
+  heartBtn: { padding: 4 },
+  heartIcon: { fontSize: 20 },
+  cardTag: { fontSize: 11, color: TURQUOISE, fontWeight: '700', textTransform: 'uppercase', letterSpacing: 0.8, marginBottom: 4 },
+  cardName: { fontSize: 18, fontWeight: '700', color: DARK, marginBottom: 6, flex: 1, paddingRight: 8 },
+  cardDesc: { fontSize: 14, color: '#555', lineHeight: 20 },
+  cardMeta: { fontSize: 12, color: GREY, marginTop: 6 },
+  badge: { fontSize: 11, color: '#ff9800', fontWeight: '700', marginTop: 6 },
+  highlight: { fontSize: 13, color: '#9c27b0', marginTop: 6, fontStyle: 'italic' },
+  link: { fontSize: 13, color: TURQUOISE, marginTop: 8, textDecorationLine: 'underline' },
+  dietaryRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginTop: 8 },
+  dietaryTag: { backgroundColor: '#f0fffe', borderRadius: 6, paddingHorizontal: 8, paddingVertical: 4, borderWidth: 1, borderColor: '#d0f0f5' },
+  dietaryText: { fontSize: 11, color: DARK },
+  tabFloatingBtn: {
+    backgroundColor: TURQUOISE, borderRadius: 30, paddingVertical: 14,
+    paddingHorizontal: 24, alignItems: 'center', marginTop: 16, marginBottom: 40,
+    shadowColor: '#000', shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.15, shadowRadius: 8, elevation: 6,
+  },
+  empty: { fontSize: 14, color: GREY, textAlign: 'center', marginTop: 40 },
+  modalOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.5)', justifyContent: 'flex-end' },
+  modalCard: { backgroundColor: WHITE, borderTopLeftRadius: 24, borderTopRightRadius: 24, padding: 24, paddingBottom: 40 },
+  modalTitle: { fontSize: 20, fontWeight: '700', color: DARK, textAlign: 'center', marginBottom: 4 },
+  modalSubtitle: { fontSize: 14, color: TURQUOISE, fontWeight: '600', textAlign: 'center', marginBottom: 20 },
+  modalOption: {
+    backgroundColor: BG, borderRadius: 14, padding: 18, marginBottom: 12,
+    borderWidth: 1, borderColor: '#d0f0f5',
+  },
+  modalOptionText: { fontSize: 15, color: DARK, fontWeight: '600' },
+  modalInput: {
+    backgroundColor: BG, borderRadius: 12, padding: 14, fontSize: 15, color: DARK,
+    minHeight: 100, textAlignVertical: 'top', borderWidth: 1, borderColor: '#d0f0f5', marginBottom: 16,
+  },
+  modalSubmit: {
+    backgroundColor: TURQUOISE, borderRadius: 30, paddingVertical: 14,
+    alignItems: 'center', marginBottom: 8,
+  },
+  modalSubmitDisabled: { opacity: 0.4 },
+  modalSubmitText: { color: WHITE, fontSize: 15, fontWeight: '700' },
+  modalCancel: { paddingVertical: 10, alignItems: 'center' },
+  modalCancelText: { color: GREY, fontSize: 14 },
+  modalThanks: { fontSize: 20, fontWeight: '700', color: TURQUOISE, textAlign: 'center', paddingVertical: 30 },
+});
