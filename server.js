@@ -173,10 +173,11 @@ STRICT RULES FOR THIS TAB:
 - NEVER include markets here — markets belong in the Markets tab only
 - Only include genuine events: festivals, sporting events, concerts, community gatherings, cultural celebrations
 - Include major annual events the local area is known for even if not currently running
+- Set isFree to true only if the event has genuinely free entry; otherwise false. Do not include a specific price field.
 
-Two types: WHAT'S ON NOW (real current events) and LANDMARK ANNUAL EVENTS (events locals plan their year around). For each: name, type, timeframe, date, exact venue, price, booking search term, insider tip.
+Two types: WHAT'S ON NOW (real current events) and LANDMARK ANNUAL EVENTS (events locals plan their year around). For each: name, type, timeframe, date, exact venue, whether free, booking search term, insider tip.
 
-Return JSON: {"items":[{"name":"","type":"cultural|sporting|music|community|food|religious","timeframe":"today|tomorrow|thisweek|thismonth|annual","date":"","time":"","venue":"","neighbourhood":"","price":"","bookingSearch":"","soldOutRisk":false,"localTip":"","description":""}]}`,
+Return JSON: {"items":[{"name":"","type":"cultural|sporting|music|community|food|religious","timeframe":"today|tomorrow|thisweek|thismonth|annual","date":"","time":"","venue":"","neighbourhood":"","isFree":false,"bookingSearch":"","soldOutRisk":false,"localTip":"","description":""}]}`,
 
   drink: (city) => `You are Localé's Drink Agent for ${city}. Surface the drinking culture unique to this city. THE BOURDAIN TEST APPLIES.
 
