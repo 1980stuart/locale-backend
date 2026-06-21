@@ -19,6 +19,136 @@ app.get('/', (req, res) => {
   res.json({ status: 'Locale backend running' });
 });
 
+// Categories that get an upfront real-venue candidate list from Google Places,
+// to curate from. Radius is wider for Art/Markets since small towns often have
+// zero galleries/markets within their own boundaries (per the existing prompt
+// language for both, which already calls for regional scope).
+const PLACES_UPFRONT_CONFIG = {
+  coffee: { query: 'coffee shop', radiusMeters: 8000 },
+  eating: { query: 'restaurant', radiusMeters: 8000 },
+  markets: { query: 'market', radiusMeters: 30000 },
+  art: { query: 'art gallery', radiusMeters: 30000 },
+};
+
+// Categories that get a post-hoc existence check on whatever Claude actually
+// names, regardless of whether an upfront list was used. 'itemFilter' narrows
+// which items get checked for categories that mix venue and non-venue content —
+// e.g. Drink's 'bar' items get checked, its drink-culture/ritual items don't.
+const VENUE_CHECK_CONFIG = {
+  coffee: { itemFilter: null },
+  eating: { itemFilter: null },
+  markets: { itemFilter: null },
+  art: { itemFilter: null },
+  drink: { itemFilter: (item) => item.type === 'bar' },
+  walk: { itemFilter: (item) => item.type === 'swimspot' || item.type === 'lookout' },
+  mustsee: { itemFilter: null },
+};
+
+async function geocodeCity(city) {
+  try {
+    const url = 'https://maps.googleapis.com/maps/api/geocode/json?address=' +
+      encodeURIComponent(city) + '&key=' + process.env.GOOGLE_KEY;
+    const r = await fetch(url);
+    const d = await r.json();
+    const loc = d.results && d.results[0] && d.results[0].geometry && d.results[0].geometry.location;
+    return loc ? { lat: loc.lat, lng: loc.lng } : null;
+  } catch (e) {
+    console.error('Geocode error:', e.message);
+    return null;
+  }
+}
+
+// Upfront candidate list — Basic-tier fields only (name + address, no ratings/
+// photos). Deliberate: ratings must never drive which venues get selected,
+// only Claude's own local-judgment curation does that. This is just real
+// material to curate from, not a ranked shortlist.
+// ⚠️ DO NOT add 'places.rating', 'places.userRatingCount', or 'places.photos'
+// to the FieldMask below. EVER. This is not a style preference — it's the
+// single thing keeping Google's popularity signals out of the recommendation
+// pipeline entirely. The whole point of this system is: Google verifies a
+// venue is REAL, Claude's own local-judgment curation (Bourdain Test, "Local
+// over Tourist", chain exclusions in MASTER_SYSTEM) decides what's GOOD.
+// Adding rating data here — even just to "help" Claude pick better venues —
+// would let popularity quietly drive selection, biasing toward exactly the
+// overexposed, touristy spots this whole brand exists to avoid. If someone
+// is tempted to add ratings here later "to improve quality," don't — the fix
+// for quality problems belongs in MASTER_SYSTEM's curation rules, not here.
+async function fetchPlacesCandidates(city, category) {
+  const config = PLACES_UPFRONT_CONFIG[category];
+  if (!config) return [];
+  try {
+    const coords = await geocodeCity(city);
+    if (!coords) return [];
+    const r = await fetch('https://places.googleapis.com/v1/places:searchText', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Goog-Api-Key': process.env.GOOGLE_KEY,
+        'X-Goog-FieldMask': 'places.displayName,places.formattedAddress' // Basic tier only — see warning above, never add rating/photos
+      },
+      body: JSON.stringify({
+        textQuery: config.query + ' in ' + city,
+        locationBias: {
+          circle: {
+            center: { latitude: coords.lat, longitude: coords.lng },
+            radius: config.radiusMeters
+          }
+        }
+      })
+    });
+    const d = await r.json();
+    if (!Array.isArray(d.places)) return [];
+    return d.places
+      .map(p => ({ name: p.displayName && p.displayName.text, address: p.formattedAddress }))
+      .filter(p => p.name)
+      .slice(0, 20);
+  } catch (e) {
+    console.error('Places candidates error:', e.message);
+    return [];
+  }
+}
+
+function candidatesToPromptText(candidates) {
+  if (!candidates || candidates.length === 0) return '';
+  const list = candidates.map(c => '- ' + c.name + (c.address ? ' (' + c.address + ')' : '')).join('\n');
+  return `\n\nREAL VENUES CONFIRMED TO CURRENTLY EXIST (from Google Places — use this as your candidate pool, do not invent venues outside this list, but you do not have to include all of them — apply your own local-knowledge judgement to pick which of these are genuinely worth recommending, not just which exist):\n${list}`;
+}
+
+// Post-hoc check: does a named venue actually verify against Places? Fails
+// open on any error — a flaky API call should never make a result worse than
+// today's behaviour, only catch genuine fabrications.
+async function verifyVenueExists(venueName, city) {
+  try {
+    const r = await fetch('https://places.googleapis.com/v1/places:searchText', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Goog-Api-Key': process.env.GOOGLE_KEY,
+        'X-Goog-FieldMask': 'places.displayName'
+      },
+      body: JSON.stringify({ textQuery: venueName + ' ' + city })
+    });
+    const d = await r.json();
+    return Array.isArray(d.places) && d.places.length > 0;
+  } catch (e) {
+    console.error('Venue verification error:', e.message);
+    return true; // fail open
+  }
+}
+
+async function verifyItemsExist(items, city, category) {
+  const config = VENUE_CHECK_CONFIG[category];
+  if (!config || !Array.isArray(items)) return items;
+  const checked = await Promise.all(items.map(async (item) => {
+    if (config.itemFilter && !config.itemFilter(item)) return item; // not a venue claim, skip check
+    if (!item.name) return item;
+    const exists = await verifyVenueExists(item.name, city);
+    if (!exists) console.log('VENUE_REJECTED', category, item.name, city);
+    return exists ? item : null;
+  }));
+  return checked.filter(Boolean);
+}
+
 const MASTER_SYSTEM = `You are a Localé city agent — a deeply knowledgeable local expert for every city in the world.
 
 Your purpose is to give travellers genuine insider knowledge that they cannot find in guidebooks, travel blogs or tourist websites.
@@ -97,7 +227,7 @@ For each neighbourhood: name, one-word character, who lives there, what makes it
 
 Return JSON: {"items":[{"name":"","vibe":"","who":"","description":"","bestFor":"","localSecret":"","caution":""}]}`,
 
-  coffee: (city) => `You are Localé's Coffee Agent for ${city}. Find independent coffee shops locals actually use — no chains, no tourist cafes.
+  coffee: (city, candidatesText) => `You are Localé's Coffee Agent for ${city}. Find independent coffee shops locals actually use — no chains, no tourist cafes.
 
 STRICT RULES FOR THIS TAB:
 - CRITICAL: Only include coffee shops you are highly confident are currently open and trading. If you have any doubt — omit the venue entirely. A closed recommendation destroys trust.
@@ -108,7 +238,7 @@ STRICT RULES FOR THIS TAB:
 
 For each: name, exact neighbourhood/street, opening time, earlyBird flag if before 8am, what locals order, what makes it irreplaceable, price (specific), local tip, a precise map search term combining the venue name and street/area for accurate map lookup.
 
-Return JSON: {"items":[{"name":"","neighbourhood":"","opens":"","earlyBird":true,"order":"","price":"","localTip":"","mapSearch":"","description":""}]}`,
+Return JSON: {"items":[{"name":"","neighbourhood":"","opens":"","earlyBird":true,"order":"","price":"","localTip":"","mapSearch":"","description":""}]}${candidatesText || ''}`,
 
   food: (city) => `You are Localé's Food Agent for ${city}. Surface dishes and street food that define this city's food identity. THE BOURDAIN TEST APPLIES.
 
@@ -121,7 +251,7 @@ Two sections: ICONIC DISHES (dishes uniquely famous to this city — dish name i
 
 Return JSON: {"items":[{"name":"","localName":"","section":"dish|streetfood","where":"","when":"","price":"","orderThis":"","localTip":"","description":""}]}`,
 
-  eating: (city) => `You are Localé's Eating Agent for ${city}. Find restaurants locals genuinely love — hidden from mainstream guides, unknown to tourists. THE BOURDAIN TEST APPLIES.
+  eating: (city, candidatesText) => `You are Localé's Eating Agent for ${city}. Find restaurants locals genuinely love — hidden from mainstream guides, unknown to tourists. THE BOURDAIN TEST APPLIES.
 
 STRICT RULES FOR THIS TAB:
 - CRITICAL: Only include restaurants you are highly confident currently exist and are open. If uncertain — omit entirely. Never recommend a closed restaurant.
@@ -133,9 +263,9 @@ STRICT RULES FOR THIS TAB:
 
 For each: name, exact neighbourhood/street, the single dish to order, price, best time (specific), whether to book, dietary flags, local tip, a precise map search term combining the venue name and street/area for accurate map lookup.
 
-Return JSON: {"items":[{"name":"","neighbourhood":"","mustOrder":"","price":"$","bestTime":"","bookAhead":false,"dietary":[],"localTip":"","mapSearch":"","description":""}]}`,
+Return JSON: {"items":[{"name":"","neighbourhood":"","mustOrder":"","price":"$","bestTime":"","bookAhead":false,"dietary":[],"localTip":"","mapSearch":"","description":""}]}${candidatesText || ''}`,
 
-  markets: (city) => `You are Localé's Markets Agent for ${city}. Find markets locals actually use — not sanitised tourist markets.
+  markets: (city, candidatesText) => `You are Localé's Markets Agent for ${city}. Find markets locals actually use — not sanitised tourist markets.
 
 STRICT RULES FOR THIS TAB:
 - NEVER include supermarkets, IGA, Woolworths, Coles or any retail chain
@@ -145,9 +275,9 @@ STRICT RULES FOR THIS TAB:
 
 For each: name, exact location, type (food/produce/antique/flea/specialist/night), best day and time (specific — "Sunday from 6am" not "weekends"), what to buy, price range, how to get there, a precise map search term combining the market name and street/area for accurate map lookup.
 
-Return JSON: {"items":[{"name":"","type":"","neighbourhood":"","when":"","bestTime":"","buyThis":"","price":"","howToGet":"","localTip":"","mapSearch":"","description":""}]}`,
+Return JSON: {"items":[{"name":"","type":"","neighbourhood":"","when":"","bestTime":"","buyThis":"","price":"","howToGet":"","localTip":"","mapSearch":"","description":""}]}${candidatesText || ''}`,
 
-  art: (city) => `You are Localé's Art Agent for ${city}. Surface artworks and architecture that define this city's cultural identity.
+  art: (city, candidatesText) => `You are Localé's Art Agent for ${city}. Surface artworks and architecture that define this city's cultural identity.
 
 STRICT RULES FOR THIS TAB:
 - Always use the correct location for galleries and art spaces — verify which suburb or street they are actually in
@@ -156,7 +286,7 @@ STRICT RULES FOR THIS TAB:
 
 Two tests: WORLD CLASS (genuinely among the greatest works) and LOCAL (works locals love that tourists rarely find). Best lists have both. For each: name, artist/architect, exact location (correct suburb/street), neighbourhood, opening hours, entry price including free days, best time to visit, local tip.
 
-Return JSON: {"items":[{"name":"","artist":"","type":"artwork|architecture|mural","imageSearch":"","location":"","neighbourhood":"","websiteSearch":"","opens":"","price":"","hiddenGem":false,"localTip":"","description":""}]}`,
+Return JSON: {"items":[{"name":"","artist":"","type":"artwork|architecture|mural","imageSearch":"","location":"","neighbourhood":"","websiteSearch":"","opens":"","price":"","hiddenGem":false,"localTip":"","description":""}]}${candidatesText || ''}`,
 
   walk: (city) => `You are Localé's Walk Agent for ${city}. Surface walking routes, swimming spots, and lookouts that reveal the true character of this city.
 
@@ -255,6 +385,16 @@ async function fetchSearchContext(city, category) {
   }
 }
 
+function extractJSONServer(text) {
+  let cleaned = text.replace(/```json|```/g, '').trim();
+  const firstBrace = cleaned.indexOf('{');
+  const lastBrace = cleaned.lastIndexOf('}');
+  if (firstBrace !== -1 && lastBrace !== -1 && lastBrace > firstBrace) {
+    cleaned = cleaned.substring(firstBrace, lastBrace + 1);
+  }
+  return JSON.parse(cleaned);
+}
+
 app.post('/claude', async (req, res) => {
   try {
     const response = await fetch('https://api.anthropic.com/v1/messages', {
@@ -350,6 +490,12 @@ app.post('/recommendations', async (req, res) => {
       return res.status(400).json({ error: 'Unknown category: ' + category });
     }
 
+    let candidatesText = '';
+    if (PLACES_UPFRONT_CONFIG[category]) {
+      const candidates = await fetchPlacesCandidates(city, category);
+      candidatesText = candidatesToPromptText(candidates);
+    }
+
     const searchContext = await fetchSearchContext(city, category);
     const response = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
@@ -372,10 +518,30 @@ app.post('/recommendations', async (req, res) => {
             text: 'Return only valid JSON. No markdown, no backticks, no explanation. Do not add any text, notes, or commentary before or after the JSON object — including notes about items you excluded or chose not to include. If you have low confidence in finding genuine results for this city/category, or can only confidently verify a small number of items, include a "note" field at the top level of the JSON object (alongside "items") explaining this briefly and honestly to the traveller — for example: {"note":"Only one coffee shop could be confidently verified as currently open in this town — fewer options exist here than in larger cities.","items":[...]}. Never write this explanation as plain text outside the JSON object.'
           }
         ],
-        messages: [{ role: 'user', content: PROMPTS[category](city) + searchContext }]
+        messages: [{ role: 'user', content: PROMPTS[category](city, candidatesText) + searchContext }]
       })
     });
     const data = await response.json();
+
+    // Post-hoc venue existence check — catches anything hallucinated regardless
+    // of whether it came from the upfront list or Claude's own knowledge.
+    // Fails open: if parsing/verification itself errors, leave the response untouched.
+    if (VENUE_CHECK_CONFIG[category] && data.content && data.content[0] && data.content[0].text) {
+      try {
+        const parsed = extractJSONServer(data.content[0].text);
+        if (parsed.items && Array.isArray(parsed.items)) {
+          const beforeCount = parsed.items.length;
+          parsed.items = await verifyItemsExist(parsed.items, city, category);
+          if (parsed.items.length < beforeCount) {
+            console.log('VENUE_CHECK', category, city, beforeCount - parsed.items.length, 'item(s) removed');
+          }
+          data.content[0].text = JSON.stringify(parsed);
+        }
+      } catch (e) {
+        console.error('Post-hoc verification error:', e.message);
+      }
+    }
+
     saveToCache(cacheKey, data);
     res.json(data);
   } catch(e) {
@@ -485,7 +651,6 @@ async function pingSupabase() {
   }
 }
 
-// Ping every 3 days to prevent Supabase free tier pausing after 7 days inactivity
 setInterval(pingSupabase, 3 * 24 * 60 * 60 * 1000);
 pingSupabase();
 
