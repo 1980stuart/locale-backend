@@ -310,6 +310,7 @@ STRICT RULES FOR THIS TAB:
 - Only include genuine events: festivals, sporting events, concerts, community gatherings, cultural celebrations
 - Include major annual events the local area is known for even if not currently running
 - Set isFree to true only if the event has genuinely free entry; otherwise false. Do not include a specific price field.
+- The "date" field must always contain a real calendar date or, if an exact date genuinely is not knowable, at least an approximate month (e.g. "Late September" or "Throughout July"). Never leave it vague like "soon" or "this season", and never leave it blank.
 
 Two types: WHAT'S ON NOW (real current events) and LANDMARK ANNUAL EVENTS (events locals plan their year around). For each: name, type, timeframe, date, exact venue, whether free, booking search term, insider tip.
 
