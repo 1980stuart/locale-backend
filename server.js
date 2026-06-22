@@ -604,4 +604,298 @@ app.get('/favourites', async (req, res) => {
     const data = await r.json();
     res.json(data);
   } catch(e) {
-    res.status(500).json({ error: e.message
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.delete('/favourites/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const r = await fetch(SUPABASE_URL + '/rest/v1/favourites?id=eq.' + encodeURIComponent(id), {
+      method: 'DELETE',
+      headers: supabaseHeaders()
+    });
+    res.json({ deleted: true });
+  } catch(e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post('/feedback', async (req, res) => {
+  try {
+    const { device_id, city, type, message } = req.body;
+    if (!city || !type || !message) {
+      return res.status(400).json({ error: 'city, type, message are required' });
+    }
+    if (type !== 'loved' && type !== 'suggestion') {
+      return res.status(400).json({ error: 'type must be loved or suggestion' });
+    }
+    const r = await fetch(SUPABASE_URL + '/rest/v1/feedback', {
+      method: 'POST',
+      headers: { ...supabaseHeaders(), 'Prefer': 'return=representation' },
+      body: JSON.stringify({ device_id, city, type, message })
+    });
+    const data = await r.json();
+    res.json(data);
+  } catch(e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+async function pingSupabase() {
+  try {
+    await fetch(SUPABASE_URL + '/rest/v1/keepalive', {
+      method: 'POST',
+      headers: { ...supabaseHeaders(), 'Prefer': 'return=minimal' },
+      body: JSON.stringify({})
+    });
+    console.log('Supabase keepalive ping sent');
+  } catch (e) {
+    console.log('Supabase keepalive ping failed:', e.message);
+  }
+}
+
+setInterval(pingSupabase, 3 * 24 * 60 * 60 * 1000);
+pingSupabase();
+
+// ===== Daily Usage Report & Feedback System — added 22 June =====
+// Two separate daily emails via Resend. No AI involved — simple aggregation
+// of existing Supabase data, same plain-fetch style as the rest of this file.
+
+function hours24Ago() {
+  return new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+}
+
+function todayStr() {
+  return new Date().toISOString().slice(0, 10);
+}
+
+function csvEscape(val) {
+  if (val === null || val === undefined) return '';
+  const str = String(val);
+  if (/[",\n]/.test(str)) return '"' + str.replace(/"/g, '""') + '"';
+  return str;
+}
+
+function toCSV(rows, columns) {
+  const header = columns.join(',');
+  const lines = rows.map(row => columns.map(col => csvEscape(row[col])).join(','));
+  return [header, ...lines].join('\r\n');
+}
+
+async function supabaseSelect(table, queryParams) {
+  try {
+    const r = await fetch(SUPABASE_URL + '/rest/v1/' + table + '?' + queryParams, {
+      headers: supabaseHeaders()
+    });
+    const data = await r.json();
+    return Array.isArray(data) ? data : [];
+  } catch (e) {
+    console.error('Supabase select error (' + table + '):', e.message);
+    return [];
+  }
+}
+
+async function supabaseCount(table) {
+  try {
+    const r = await fetch(SUPABASE_URL + '/rest/v1/' + table + '?select=created_at', {
+      headers: {
+        ...supabaseHeaders(),
+        'Prefer': 'count=exact',
+        'Range-Unit': 'items',
+        'Range': '0-0'
+      }
+    });
+    const range = r.headers.get('content-range');
+    if (range && range.includes('/')) {
+      const total = range.split('/')[1];
+      return total === '*' ? null : parseInt(total, 10);
+    }
+    return null;
+  } catch (e) {
+    console.error('Supabase count error (' + table + '):', e.message);
+    return null;
+  }
+}
+
+// Fire-and-forget — never blocks or fails the actual /recommendations response,
+// same pattern as the existing saveToCache call above.
+function logUsageEvent(deviceId, city, category, cacheStatus) {
+  fetch(SUPABASE_URL + '/rest/v1/usage_events', {
+    method: 'POST',
+    headers: { ...supabaseHeaders(), 'Prefer': 'return=minimal' },
+    body: JSON.stringify({
+      device_id: deviceId || null,
+      city: city,
+      category: category,
+      cache_status: cacheStatus
+    })
+  }).catch(e => console.error('usage_events insert error:', e.message));
+}
+
+async function sendResendEmail({ subject, text, attachments }) {
+  try {
+    const res = await fetch('https://api.resend.com/emails', {
+      method: 'POST',
+      headers: {
+        'Authorization': 'Bearer ' + process.env.RESEND_API_KEY,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        from: 'Locale Reports <reports@send.localetravelapp.com>',
+        to: ['hello@localetravelapp.com'],
+        subject: subject,
+        text: text,
+        attachments: attachments
+      })
+    });
+    if (!res.ok) {
+      const errText = await res.text();
+      console.error('Resend email failed:', res.status, errText);
+      return false;
+    }
+    console.log('Email sent:', subject);
+    return true;
+  } catch (e) {
+    console.error('Resend email error:', e.message);
+    return false;
+  }
+}
+
+async function buildUsageReport() {
+  const since = hours24Ago();
+
+  const newCacheRows = await supabaseSelect('recommendations_cache', 'select=cache_key,created_at&created_at=gte.' + encodeURIComponent(since));
+  const newFavourites = await supabaseSelect('favourites', 'select=*&created_at=gte.' + encodeURIComponent(since));
+  const newUsageEvents = await supabaseSelect('usage_events', 'select=*&created_at=gte.' + encodeURIComponent(since));
+  const totalCacheRows = await supabaseCount('recommendations_cache');
+  const totalFavourites = await supabaseCount('favourites');
+
+  const cityCounts = {}, categoryCounts = {}, favCategoryCounts = {};
+  newCacheRows.forEach(row => {
+    const parts = (row.cache_key || '').split('|');
+    const city = parts[0], category = parts[1];
+    cityCounts[city] = (cityCounts[city] || 0) + 1;
+    categoryCounts[category] = (categoryCounts[category] || 0) + 1;
+  });
+  newFavourites.forEach(f => {
+    favCategoryCounts[f.category] = (favCategoryCounts[f.category] || 0) + 1;
+  });
+
+  const distinctDevices = new Set(newUsageEvents.filter(e => e.device_id).map(e => e.device_id));
+  const hits = newUsageEvents.filter(e => e.cache_status === 'hit').length;
+  const misses = newUsageEvents.filter(e => e.cache_status === 'miss').length;
+
+  const sortDesc = obj => Object.entries(obj).sort((a, b) => b[1] - a[1]);
+  const topCities = sortDesc(cityCounts);
+  const topCategories = sortDesc(categoryCounts);
+  const topFavCategories = sortDesc(favCategoryCounts);
+
+  const text = [
+    'Localé — Daily Usage Report — ' + todayStr(),
+    '',
+    'LAST 24 HOURS',
+    '- Total app requests logged: ' + newUsageEvents.length + ' (' + hits + ' cache hits, ' + misses + ' new generations)',
+    '- Distinct devices seen: ' + distinctDevices.size + ' (will read 0 until the App.js device_id update ships)',
+    '- New favourites saved: ' + newFavourites.length,
+    '',
+    'TOP CITIES SEARCHED (last 24h, first-time generations)',
+    topCities.map(([c, n]) => '- ' + c + ': ' + n).join('\n') || '(none)',
+    '',
+    'TOP CATEGORIES SEARCHED (last 24h, first-time generations)',
+    topCategories.map(([c, n]) => '- ' + c + ': ' + n).join('\n') || '(none)',
+    '',
+    'TOP CATEGORIES FAVOURITED (last 24h)',
+    topFavCategories.map(([c, n]) => '- ' + c + ': ' + n).join('\n') || '(none)',
+    '',
+    'ALL-TIME TOTALS',
+    '- Total city/category combos ever generated: ' + (totalCacheRows ?? 'n/a'),
+    '- Total favourites ever saved: ' + (totalFavourites ?? 'n/a'),
+    '',
+    'Full row-level data attached as CSV.'
+  ].join('\n');
+
+  const attachments = [
+    { filename: 'usage_events_' + todayStr() + '.csv', content: Buffer.from(toCSV(newUsageEvents, ['device_id', 'city', 'category', 'cache_status', 'created_at'])).toString('base64') },
+    { filename: 'favourites_' + todayStr() + '.csv', content: Buffer.from(toCSV(newFavourites, ['device_id', 'city', 'category', 'item_name', 'created_at'])).toString('base64') }
+  ];
+
+  return { text, attachments };
+}
+
+async function buildFeedbackReport() {
+  const since = hours24Ago();
+
+  const newFeedback = await supabaseSelect('feedback', 'select=*&created_at=gte.' + encodeURIComponent(since));
+  const totalFeedback = await supabaseCount('feedback');
+
+  const feedbackLines = newFeedback.map(f =>
+    '[' + f.type + '] ' + f.city + ' — "' + f.message + '" (' + f.created_at + ')'
+  ).join('\n\n') || '(none)';
+
+  const text = [
+    'Localé — Daily Feedback — ' + todayStr(),
+    '',
+    'NEW FEEDBACK (last 24h): ' + newFeedback.length,
+    '',
+    feedbackLines,
+    '',
+    'All-time feedback total: ' + (totalFeedback ?? 'n/a'),
+    '',
+    'Full data attached as CSV.'
+  ].join('\n');
+
+  const attachments = [
+    { filename: 'feedback_' + todayStr() + '.csv', content: Buffer.from(toCSV(newFeedback, ['device_id', 'city', 'type', 'message', 'created_at'])).toString('base64') }
+  ];
+
+  return { text, attachments };
+}
+
+// 04:00 UTC = 7am Riyadh / 2pm Brisbane (both fixed offsets year-round, no DST)
+cron.schedule('0 4 * * *', async () => {
+  try {
+    const report = await buildUsageReport();
+    await sendResendEmail({ subject: 'Localé Usage Report — ' + todayStr(), text: report.text, attachments: report.attachments });
+  } catch (e) { console.error('Usage report failed:', e.message); }
+});
+
+cron.schedule('5 4 * * *', async () => {
+  try {
+    const report = await buildFeedbackReport();
+    await sendResendEmail({ subject: 'Localé Feedback — ' + todayStr(), text: report.text, attachments: report.attachments });
+  } catch (e) { console.error('Feedback report failed:', e.message); }
+});
+
+// Manual test endpoints — ?key=ADMIN_SECRET to view, &send=true to actually email
+app.get('/admin/daily-report', async (req, res) => {
+  if (req.query.key !== process.env.ADMIN_SECRET) return res.status(403).json({ error: 'Forbidden' });
+  try {
+    const report = await buildUsageReport();
+    if (req.query.send === 'true') {
+      await sendResendEmail({ subject: 'Localé Usage Report — ' + todayStr() + ' (test)', text: report.text, attachments: report.attachments });
+      return res.json({ status: 'sent' });
+    }
+    return res.json({ text: report.text });
+  } catch (e) {
+    console.error(e.message);
+    return res.status(500).json({ error: 'Failed to build report' });
+  }
+});
+
+app.get('/admin/daily-feedback', async (req, res) => {
+  if (req.query.key !== process.env.ADMIN_SECRET) return res.status(403).json({ error: 'Forbidden' });
+  try {
+    const report = await buildFeedbackReport();
+    if (req.query.send === 'true') {
+      await sendResendEmail({ subject: 'Localé Feedback — ' + todayStr() + ' (test)', text: report.text, attachments: report.attachments });
+      return res.json({ status: 'sent' });
+    }
+    return res.json({ text: report.text });
+  } catch (e) {
+    console.error(e.message);
+    return res.status(500).json({ error: 'Failed to build report' });
+  }
+});
+
+app.listen(PORT, () => console.log('Locale backend running on port ' + PORT));
