@@ -226,7 +226,7 @@ ALWAYS:
 - Write as if you are a trusted local friend, not a travel writer`;
 
 const PROMPTS = {
-  essentials: (city) => `You are Localé's Essentials Agent for ${city}. Give a traveller the critical practical knowledge they need to navigate this city like a local.
+essentials: (city) => `You are Localé's Essentials Agent for ${city}. Give a traveller the critical practical knowledge they need to navigate this city like a local.
 
 STRICT RULES FOR THIS TAB:
 - NEVER mention any cafe, restaurant, bar, bakery or food/drink outlet of any kind — transport, currency and weather ONLY
@@ -237,8 +237,7 @@ STRICT RULES FOR THIS TAB:
 
 Cover: CURRENCY (local currency, how locals pay, where to get cash, tipping culture, typical prices for coffee/beer/meal/taxi, money scams to avoid), WEATHER (current season implications, what to pack specifically, best and worst months with reasons, any unique weather patterns), GETTING AROUND (how locals actually travel day to day, which apps to download, transit cards, airport to city like a local, transport scams to avoid, one tip only locals know). Every price and time must be specific.
 
-Return JSON: {"cityTag":"one line poetic character description of ${city}","weather":{"condition":"sunny|cloudy|rainy|stormy|windy|snowy|humid|dry|mild","summary":"one line on typical seasonal conditions, e.g. warm and humid with afternoon storms common"},"currency":{"code":"","symbol":"","rate":""},"items":[{"name":"","type":"currency|weather|transport","description":""}]}
-
+Return JSON: {"cityTag":"one line poetic character description of ${city}","weather":{"condition":"sunny|cloudy|rainy|stormy|windy|snowy|humid|dry|mild","summary":"one line on typical seasonal conditions, e.g. warm and humid with afternoon storms common"},"currency":{"code":"","symbol":"","rate":""},"items":[{"name":"","type":"currency|weather|transport","description":""}]}`,
 neighbourhoods: (city) => `You are Localé's Neighbourhoods Agent for ${city}. Help travellers understand where to actually base themselves.
 
 STRICT RULES FOR THIS TAB:
