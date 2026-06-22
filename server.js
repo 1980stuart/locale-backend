@@ -29,7 +29,7 @@ app.get('/', (req, res) => {
 // just the CBD radius.
 const PLACES_UPFRONT_CONFIG = {
   coffee: { query: 'coffee shop', radiusMeters: 20000, maxPages: 2, maxCandidates: 40 },
-  eating: { query: 'restaurant', radiusMeters: 8000 },
+  eating: { query: 'restaurant', radiusMeters: 20000, maxPages: 2, maxCandidates: 40 },
   markets: { query: 'market', radiusMeters: 30000 },
   art: { query: 'art gallery', radiusMeters: 30000 },
 };
