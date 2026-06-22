@@ -1,5 +1,6 @@
 const express = require('express');
 const cors = require('cors');
+const cron = require('node-cron');
 const app = express();
 app.use(cors());
 app.use(express.json());
@@ -438,7 +439,7 @@ app.get('/search', async (req, res) => {
 
 app.post('/recommendations', async (req, res) => {
   try {
-    const { city, category } = req.body;
+    const { city, category, device_id } = req.body; // device_id added 22 June — for usage tracking
     if (!city || !category) {
       return res.status(400).json({ error: 'city and category are required' });
     }
@@ -457,6 +458,7 @@ app.post('/recommendations', async (req, res) => {
         const twentyFourHours = 24 * 60 * 60 * 1000;
         if (ageMs < twentyFourHours) {
           console.log('CACHE_HIT', cacheKey);
+          logUsageEvent(device_id, city, category, 'hit'); // usage tracking — added 22 June
           return res.json(cached[0].response_data);
         }
       }
@@ -465,6 +467,7 @@ app.post('/recommendations', async (req, res) => {
     }
 
     console.log('CACHE_MISS', cacheKey);
+    logUsageEvent(device_id, city, category, 'miss'); // usage tracking — added 22 June
 
     if (category === 'essentials_info') {
       const r = await fetch('https://api.anthropic.com/v1/messages', {
@@ -601,58 +604,4 @@ app.get('/favourites', async (req, res) => {
     const data = await r.json();
     res.json(data);
   } catch(e) {
-    res.status(500).json({ error: e.message });
-  }
-});
-
-app.delete('/favourites/:id', async (req, res) => {
-  try {
-    const { id } = req.params;
-    const r = await fetch(SUPABASE_URL + '/rest/v1/favourites?id=eq.' + encodeURIComponent(id), {
-      method: 'DELETE',
-      headers: supabaseHeaders()
-    });
-    res.json({ deleted: true });
-  } catch(e) {
-    res.status(500).json({ error: e.message });
-  }
-});
-
-app.post('/feedback', async (req, res) => {
-  try {
-    const { device_id, city, type, message } = req.body;
-    if (!city || !type || !message) {
-      return res.status(400).json({ error: 'city, type, message are required' });
-    }
-    if (type !== 'loved' && type !== 'suggestion') {
-      return res.status(400).json({ error: 'type must be loved or suggestion' });
-    }
-    const r = await fetch(SUPABASE_URL + '/rest/v1/feedback', {
-      method: 'POST',
-      headers: { ...supabaseHeaders(), 'Prefer': 'return=representation' },
-      body: JSON.stringify({ device_id, city, type, message })
-    });
-    const data = await r.json();
-    res.json(data);
-  } catch(e) {
-    res.status(500).json({ error: e.message });
-  }
-});
-
-async function pingSupabase() {
-  try {
-    await fetch(SUPABASE_URL + '/rest/v1/keepalive', {
-      method: 'POST',
-      headers: { ...supabaseHeaders(), 'Prefer': 'return=minimal' },
-      body: JSON.stringify({})
-    });
-    console.log('Supabase keepalive ping sent');
-  } catch (e) {
-    console.log('Supabase keepalive ping failed:', e.message);
-  }
-}
-
-setInterval(pingSupabase, 3 * 24 * 60 * 60 * 1000);
-pingSupabase();
-
-app.listen(PORT, () => console.log('Locale backend running on port ' + PORT));
+    res.status(500).json({ error: e.message
