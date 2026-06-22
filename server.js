@@ -253,7 +253,7 @@ Return JSON: {"items":[{"name":"","vibe":"","who":"","description":"","bestFor":
   coffee: (city, candidatesText) => `You are Localé's Coffee Agent for ${city}. Find independent coffee shops locals actually use — no chains, no tourist cafes.
 
 STRICT RULES FOR THIS TAB:
-- CRITICAL: Only include coffee shops you are highly confident are currently open and trading. If you have any doubt — omit the venue entirely. A closed recommendation destroys trust.
+- CRITICAL: Only include coffee shops you are highly confident are currently open and trading. If you have any doubt — omit the venue entirely. A closed recommendation destroys trust. Names in the verified candidate list below have already been confirmed to exist by Google Places — for those, your judgement should focus on whether they're genuinely worth recommending, not on re-doubting whether they're real.
 - If you decide partway through generating an item that it should be excluded, do NOT include that item in the array at all — not even as a placeholder with empty fields. Simply leave it out and continue with the next genuine recommendation.
 - Prioritise places in the main town centre and downtown areas — do not miss well-known local cafes
 - Prioritise places open before 8am — these are almost always the genuine local spots
