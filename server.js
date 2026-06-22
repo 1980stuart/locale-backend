@@ -239,7 +239,7 @@ Cover: CURRENCY (local currency, how locals pay, where to get cash, tipping cult
 
 Return JSON: {"cityTag":"one line poetic character description of ${city}","weather":{"condition":"sunny|cloudy|rainy|stormy|windy|snowy|humid|dry|mild","summary":"one line on typical seasonal conditions, e.g. warm and humid with afternoon storms common"},"currency":{"code":"","symbol":"","rate":""},"items":[{"name":"","type":"currency|weather|transport","description":""}]}
 
-  neighbourhoods: (city) => `You are Localé's Neighbourhoods Agent for ${city}. Help travellers understand where to actually base themselves.
+neighbourhoods: (city) => `You are Localé's Neighbourhoods Agent for ${city}. Help travellers understand where to actually base themselves.
 
 STRICT RULES FOR THIS TAB:
 - Only include neighbourhoods that actually exist in ${city} — never invent or confuse suburb names
