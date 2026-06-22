@@ -20,13 +20,6 @@ app.get('/', (req, res) => {
   res.json({ status: 'Locale backend running' });
 });
 
-// Categories that get an upfront real-venue candidate list from Google Places,
-// to curate from. Radius is wider for Art/Markets since small towns often have
-// zero galleries/markets within their own boundaries (per the existing prompt
-// language for both, which already calls for regional scope). Coffee/Eating
-// widened 22 June — local scenes are genuinely deep, and a bigger pool also
-// feeds the future "near me" distance-sort, which needs candidates beyond
-// just the CBD radius.
 const PLACES_UPFRONT_CONFIG = {
   coffee: { query: 'coffee shop', radiusMeters: 20000, maxPages: 2, maxCandidates: 40 },
   eating: { query: 'restaurant', radiusMeters: 20000, maxPages: 2, maxCandidates: 40 },
@@ -34,10 +27,6 @@ const PLACES_UPFRONT_CONFIG = {
   art: { query: 'art gallery', radiusMeters: 30000 },
 };
 
-// Categories that get a post-hoc existence check on whatever Claude actually
-// names, regardless of whether an upfront list was used. 'itemFilter' narrows
-// which items get checked for categories that mix venue and non-venue content —
-// e.g. Drink's 'bar' items get checked, its drink-culture/ritual items don't.
 const VENUE_CHECK_CONFIG = {
   coffee: { itemFilter: null },
   eating: { itemFilter: null },
@@ -62,25 +51,6 @@ async function geocodeCity(city) {
   }
 }
 
-// Upfront candidate list — Basic-tier fields only (name + address, no ratings/
-// photos). Deliberate: ratings must never drive which venues get selected,
-// only Claude's own local-judgment curation does that. This is just real
-// material to curate from, not a ranked shortlist.
-// ⚠️ DO NOT add 'places.rating', 'places.userRatingCount', or 'places.photos'
-// to the FieldMask below. EVER. This is not a style preference — it's the
-// single thing keeping Google's popularity signals out of the recommendation
-// pipeline entirely. The whole point of this system is: Google verifies a
-// venue is REAL, Claude's own local-judgment curation (Bourdain Test, "Local
-// over Tourist", chain exclusions in MASTER_SYSTEM) decides what's GOOD.
-// Adding rating data here — even just to "help" Claude pick better venues —
-// would let popularity quietly drive selection, biasing toward exactly the
-// overexposed, touristy spots this whole brand exists to avoid. If someone
-// is tempted to add ratings here later "to improve quality," don't — the fix
-// for quality problems belongs in MASTER_SYSTEM's curation rules, not here.
-//
-// Pagination added 22 June (Coffee, Eating) — Google returns ~20 results per
-// page; fetching a second page roughly doubles the candidate pool for an
-// extra Places API call, still only once per city per 24h cache window.
 async function fetchPlacesCandidates(city, category) {
   const config = PLACES_UPFRONT_CONFIG[category];
   if (!config) return [];
@@ -109,7 +79,7 @@ async function fetchPlacesCandidates(city, category) {
         headers: {
           'Content-Type': 'application/json',
           'X-Goog-Api-Key': process.env.GOOGLE_KEY,
-          'X-Goog-FieldMask': 'places.displayName,places.formattedAddress,nextPageToken' // Basic tier only — see warning above, never add rating/photos
+          'X-Goog-FieldMask': 'places.displayName,places.formattedAddress,nextPageToken'
         },
         body: JSON.stringify(body)
       });
@@ -117,7 +87,7 @@ async function fetchPlacesCandidates(city, category) {
       if (Array.isArray(d.places)) allPlaces = allPlaces.concat(d.places);
       if (!d.nextPageToken) break;
       pageToken = d.nextPageToken;
-      await new Promise(resolve => setTimeout(resolve, 2000)); // Google's page tokens need a short delay before they're valid
+      await new Promise(resolve => setTimeout(resolve, 2000));
     }
 
     return allPlaces
@@ -136,9 +106,6 @@ function candidatesToPromptText(candidates) {
   return `\n\nREAL VENUES CONFIRMED TO CURRENTLY EXIST (from Google Places — use this as your candidate pool, do not invent venues outside this list, but you do not have to include all of them — apply your own local-knowledge judgement to pick which of these are genuinely worth recommending, not just which exist):\n${list}`;
 }
 
-// Post-hoc check: does a named venue actually verify against Places? Fails
-// open on any error — a flaky API call should never make a result worse than
-// today's behaviour, only catch genuine fabrications.
 async function verifyVenueExists(venueName, city) {
   try {
     const r = await fetch('https://places.googleapis.com/v1/places:searchText', {
@@ -154,7 +121,7 @@ async function verifyVenueExists(venueName, city) {
     return Array.isArray(d.places) && d.places.length > 0;
   } catch (e) {
     console.error('Venue verification error:', e.message);
-    return true; // fail open
+    return true;
   }
 }
 
@@ -162,13 +129,17 @@ async function verifyItemsExist(items, city, category) {
   const config = VENUE_CHECK_CONFIG[category];
   if (!config || !Array.isArray(items)) return items;
   const checked = await Promise.all(items.map(async (item) => {
-    if (config.itemFilter && !config.itemFilter(item)) return item; // not a venue claim, skip check
+    if (config.itemFilter && !config.itemFilter(item)) return item;
     if (!item.name) return item;
     const exists = await verifyVenueExists(item.name, city);
     if (!exists) console.log('VENUE_REJECTED', category, item.name, city);
     return exists ? item : null;
   }));
   return checked.filter(Boolean);
+}
+
+function todayHumanReadable() {
+  return new Date().toLocaleDateString('en-US', { day: 'numeric', month: 'long', year: 'numeric' });
 }
 
 const MASTER_SYSTEM = `You are a Localé city agent — a deeply knowledgeable local expert for every city in the world.
@@ -235,7 +206,7 @@ STRICT RULES FOR THIS TAB:
 - If the web search context below includes what looks like an official government or public-transport-authority source (a .gov domain, or the city's actual transit authority website), treat that as the authoritative source for fares, payment methods and ticketing specifically — prioritise it over travel blogs, tourism sites, or your own training knowledge, since fare structures and payment systems change on government timelines, not yours
 - For weather: describe typical seasonal patterns only — do not exaggerate flood, cyclone or disaster risk for areas where this is uncommon. Be accurate not alarmist.
 
-Cover: CURRENCY (local currency, how locals pay, where to get cash, tipping culture, money-saving local tips and structural hacks — fare savers, discount cards, payment shortcuts only locals know about, money scams to avoid), WEATHER (current season implications, what to pack specifically, best and worst months with reasons, any unique weather patterns), GETTING AROUND (how locals actually travel day to day, which apps to download, transit cards, airport to city like a local, transport scams to avoid, one tip only locals know). Favour durable structural knowledge — fare schemes, discount cards, payment hacks — over specific prices, which go stale quickly and are hard to verify. Every time must be specific.
+Cover: CURRENCY (local currency, how locals pay, where to get cash, tipping culture, money-saving local tips and structural hacks — fare savers, discount cards, payment shortcuts only locals know about, money scams to avoid), WEATHER (current season implications, what to pack specifically, best and worst months with reasons, any unique weather patterns), GETTING AROUND (how locals actually travel day to day, which apps to download, transit cards, airport to city like a local, transport scams to avoid, TWO OR THREE separate tips only locals know — favour structural ones like fare-saving schemes, discount cards, or payment shortcuts, not just one). Favour durable structural knowledge — fare schemes, discount cards, payment hacks — over specific prices, which go stale quickly and are hard to verify. Every time must be specific.
 
 Return JSON: {"cityTag":"one line poetic character description of ${city}","weather":{"condition":"sunny|cloudy|rainy|stormy|windy|snowy|humid|dry|mild","summary":"one line on typical seasonal conditions, e.g. warm and humid with afternoon storms common"},"currency":{"code":"","symbol":"","rate":""},"items":[{"name":"","type":"currency|weather|transport","description":""}]}`,
 
@@ -247,9 +218,9 @@ STRICT RULES FOR THIS TAB:
 - If ${city} is a small town, focus on the actual streets and precincts locals use rather than invented suburbs
 - Make sure to include major residential and mixed-use districts where a large share of locals actually live, shop and socialise, even if they are less distinctive or "characterful" than other areas — a neighbourhood being ordinary to locals is not a reason to exclude it if it's genuinely where a lot of people are
 
-For each neighbourhood: name, one-word character, who lives there, what makes it unlike anywhere else in this city, the street every local knows, morning routine spots, best for (solo/couple/family/budget/luxury), one thing you can only do here, any cautions. Only include neighbourhoods locals genuinely want to be in.
+For each neighbourhood: name, one-word character, who lives there, what makes it unlike anywhere else in this city, the street every local knows, morning routine spots, best for (solo/couple/family/budget/luxury), one thing you can only do here, any cautions, a precise map search term for the neighbourhood's central area or main street.
 
-Return JSON: {"items":[{"name":"","vibe":"","who":"","description":"","bestFor":"","localSecret":"","caution":""}]}`,
+Return JSON: {"items":[{"name":"","vibe":"","who":"","description":"","bestFor":"","localSecret":"","caution":"","mapSearch":""}]}`,
 
   coffee: (city, candidatesText) => `You are Localé's Coffee Agent for ${city}. Find independent coffee shops locals actually use — no chains, no tourist cafes.
 
@@ -270,8 +241,9 @@ STRICT RULES FOR THIS TAB:
 - NEVER include specific restaurant or outlet names — dishes and street food only, not venues
 - Only include dishes and food genuinely specific to ${city} or its region — if it could belong to another city, reject it
 - Always verify the correct location of iconic dishes — do not place food in the wrong area of the city
+- Use price tiers only: "Cheap", "Mid-range", or "Special" — never a specific number, since street food prices vary stall to stall and go stale quickly
 
-Two sections: ICONIC DISHES (dishes uniquely famous to this city — dish name in local language, why it belongs to THIS city, where locals eat it by area not specific outlet, when locals eat it, price, any ritual) and STREET FOOD (roadside stalls, market vendors, hole-in-the-wall spots — what it is, which area/market to find it, best time, price, what to say if no English menu).
+Two sections: ICONIC DISHES (dishes uniquely famous to this city — dish name in local language, why it belongs to THIS city, where locals eat it by area not specific outlet, when locals eat it, price tier, any ritual) and STREET FOOD (roadside stalls, market vendors, hole-in-the-wall spots — what it is, which area/market to find it, best time, price tier, what to say if no English menu).
 
 Return JSON: {"items":[{"name":"","localName":"","section":"dish|streetfood","where":"","when":"","price":"","orderThis":"","localTip":"","description":""}]}`,
 
@@ -282,13 +254,14 @@ STRICT RULES FOR THIS TAB:
 - If you decide partway through generating an item that it should be excluded, do NOT include that item in the array at all — not even as a placeholder with empty fields. Simply leave it out and continue with the next genuine recommendation.
 - NEVER include tourist restaurants, chains, or places where the majority of diners are tourists
 - Many cities have an essential category of informal, beloved cooked-food venues that are not traditional sit-down restaurants but absolutely belong here — hawker centres in Singapore, dai pa dongs in Hong Kong, street food stalls in Bangkok, market food stalls in Palermo. If this city has its own version of this culture, actively include it — don't let "restaurant" narrow your thinking to only sit-down dining with table service.
-- Use $ cheap $$ mid $$$ special for price
+- Use price tiers only: "Cheap", "Mid-range", or "Special" — never a specific number
+- Always include a short cuisine or style tag (e.g. "Cantonese", "Thai street food", "Hawker", "Modern Italian") — this is the single most important label for the entry, shown prominently
 - Only include dietary tags that genuinely apply: vegetarian, vegan, halal, kosher, pescatarian, glutenfree
 - There is no fixed target number of items — a city with a genuinely deep, distinctive food scene may warrant many more entries than a small town, and that's correct, not a failure to curate. Every single item must still independently earn its place against every rule above. As an absolute outer limit, never exceed roughly 15 items even in the most food-rich cities — if you find yourself wanting to include more than that, you are no longer curating, you are cataloguing.
 
-For each: name, exact neighbourhood/street, the single dish to order, price, best time (specific), whether to book, dietary flags, local tip, a precise map search term combining the venue name and street/area for accurate map lookup.
+For each: name, cuisine/style tag, exact neighbourhood/street, the single dish to order, price tier, best time (specific), whether to book, dietary flags, local tip, a precise map search term combining the venue name and street/area for accurate map lookup.
 
-Return JSON: {"items":[{"name":"","neighbourhood":"","mustOrder":"","price":"$","bestTime":"","bookAhead":false,"dietary":[],"localTip":"","mapSearch":"","description":""}]}${candidatesText || ''}`,
+Return JSON: {"items":[{"name":"","cuisine":"","neighbourhood":"","mustOrder":"","price":"","bestTime":"","bookAhead":false,"dietary":[],"localTip":"","mapSearch":"","description":""}]}${candidatesText || ''}`,
 
   markets: (city, candidatesText) => `You are Localé's Markets Agent for ${city}. Find markets locals actually use — not sanitised tourist markets.
 
@@ -297,11 +270,11 @@ STRICT RULES FOR THIS TAB:
 - NEVER include bottle shops or liquor stores
 - Only include actual markets — street markets, food markets, produce markets, antique/flea markets
 - Include well-known regional markets near ${city} if they are within reasonable distance
-- Use $ cheap $$ mid $$$ special for price — never a specific number, since prices vary stall to stall and go stale quickly
+- Do NOT include any price information at all — prices at markets vary stall to stall and are not meaningful to state generally
 
-For each: name, exact location, type (food/produce/antique/flea/specialist/night), best day and time (specific — "Sunday from 6am" not "weekends"), what to buy, price tier, how to get there, a precise map search term combining the market name and street/area for accurate map lookup.
+For each: name, exact location, type (food/produce/antique/flea/specialist/night), best day and time (specific — "Sunday from 6am" not "weekends"), what to buy, how to get there, a precise map search term combining the market name and street/area for accurate map lookup.
 
-Return JSON: {"items":[{"name":"","type":"","neighbourhood":"","when":"","bestTime":"","buyThis":"","price":"","howToGet":"","localTip":"","mapSearch":"","description":""}]}${candidatesText || ''}`,
+Return JSON: {"items":[{"name":"","type":"","neighbourhood":"","when":"","bestTime":"","buyThis":"","howToGet":"","localTip":"","mapSearch":"","description":""}]}${candidatesText || ''}`,
 
   art: (city, candidatesText) => `You are Localé's Art Agent for ${city}. Surface artworks and architecture that define this city's cultural identity.
 
@@ -334,11 +307,13 @@ Return JSON: {"items":[{"name":"","type":"selfguided|freetour|guidedtour|cycling
 
   events: (city) => `You are Localé's Events Agent for ${city}. Surface what is actually happening — current events and landmark annual events.
 
+Today's actual date is ${todayHumanReadable()}. Use this as ground truth for all date reasoning in this response — do not rely on assumptions from search results alone if they conflict with this date.
+
 STRICT RULES FOR THIS TAB:
 - NEVER include markets here — markets belong in the Markets tab only
 - Only include genuine events: festivals, sporting events, concerts, community gatherings, cultural celebrations
 - Include major annual events the local area is known for even if not currently running
-- If an annual event's most recent occurrence has already happened this year, give the date for its NEXT upcoming occurrence instead — never a date that has already passed. The date shown must always be genuinely upcoming.
+- If an annual event's most recent occurrence falls before today's date (given above), you MUST calculate and give the date for its NEXT upcoming occurrence instead — never give a date that has already passed relative to today's date. Check this explicitly for every annual event before finalising its date field.
 - Set isFree to true only if the event has genuinely free entry; otherwise false. Do not include a specific price field.
 - The "date" field must always contain a real calendar date or, if an exact date genuinely is not knowable, at least an approximate month (e.g. "Late September" or "Throughout July"). Never leave it vague like "soon" or "this season", and never leave it blank.
 
@@ -353,9 +328,9 @@ STRICT RULES FOR THIS TAB:
 - If you decide partway through generating an item that it should be excluded, do NOT include that item in the array at all — not even as a placeholder with empty fields. Simply leave it out and continue with the next genuine recommendation.
 - Only recommend drinks culture genuinely specific to ${city} — never import drinking culture from another country or region
 - Include the main well-known local bars that locals actually use — do not miss obvious key venues
-- Use $ cheap $$ mid $$$ special for price — never a specific number, since drink prices vary by order and go stale quickly
+- Use price tiers only: "Cheap", "Mid-range", or "Special" for a round — never a specific number, since drink prices vary by order and go stale quickly
 
-Three sections: LOCAL DRINK (what this city/region actually drinks — specific beer/wine/spirit, how locals drink it, price), LOCAL BAR (where locals actually drink — name, neighbourhood, what to order, best time, price tier for a round, a precise map search term for venues only), DRINKING RITUAL (when and how locals drink, social rules, food that accompanies). THE GOLD STANDARD: Bia Hơi in Hanoi. Find the equivalent.
+Three sections: LOCAL DRINK (what this city/region actually drinks — specific beer/wine/spirit, how locals drink it, price tier), LOCAL BAR (where locals actually drink — name, neighbourhood, what to order, best time, price tier for a round, a precise map search term for venues only), DRINKING RITUAL (when and how locals drink, social rules, food that accompanies). THE GOLD STANDARD: Bia Hơi in Hanoi. Find the equivalent.
 
 Return JSON: {"items":[{"name":"","type":"localdrink|bar|ritual|producer","drink":"","neighbourhood":"","bestTime":"","price":"","orderThis":"","ritual":"","localTip":"","mapSearch":"","description":""}]}`,
 
@@ -365,9 +340,9 @@ THE ONLY HERE TEST: Can you do this at night in any other city? If yes — rejec
 EXAMPLES THAT PASS: watching sunset behind the Acropolis with Athenians drinking wine from paper cups / floating in the Dead Sea at midnight / watching fishing boats leave Essaouira at 4am / lying on a car bonnet watching the Milky Way in the Australian outback / fado drifting from an open window in Alfama / swimming in a bioluminescent bay as your wake glows blue / drifting past lantern-lit boats during a river lantern festival / the smell of grilled skewers and sound of mahjong tiles in a night market / soaking in an open-air onsen under the stars / the specific hour a call to prayer echoes through an empty old town.
 EXAMPLES THAT FAIL: rooftop bar / jazz club / waterfront walk / nightclub.
 
-THIS TAB IS EXPERIENCES NOT VENUES — bars go in Drink, restaurants go in Eating. For each: name, type, when (specific time), duration, exact where, why it only exists here (onlyHereReason), local tip. THE BOURDAIN TEST APPLIES.
+THIS TAB IS EXPERIENCES NOT VENUES — bars go in Drink, restaurants go in Eating. For each: name, type, when (specific time), duration, exact where, why it only exists here (onlyHereReason), local tip, and — if this experience has a specific findable location (not every one will) — a precise map search term for it. THE BOURDAIN TEST APPLIES.
 
-Return JSON: {"items":[{"name":"","type":"natural|cultural|atmospheric|ritual|viewpoint|landscape|music|moment","when":"","duration":"","where":"","onlyHereReason":"","localTip":"","description":""}]}`,
+Return JSON: {"items":[{"name":"","type":"natural|cultural|atmospheric|ritual|viewpoint|landscape|music|moment","when":"","duration":"","where":"","onlyHereReason":"","localTip":"","mapSearch":"","description":""}]}`,
 
   mustsee: (city) => `You are Localé's Must See Agent for ${city}. Answer: what would a knowledgeable local who loves this city tell a traveller they absolutely cannot miss — and what would genuinely surprise even an experienced traveller?
 
@@ -469,14 +444,13 @@ app.get('/search', async (req, res) => {
 
 app.post('/recommendations', async (req, res) => {
   try {
-    const { city, category, device_id } = req.body; // device_id added 22 June — for usage tracking
+    const { city, category, device_id } = req.body;
     if (!city || !category) {
       return res.status(400).json({ error: 'city and category are required' });
     }
 
     const cacheKey = city.trim().toLowerCase() + '|' + category;
 
-    // Check cache first (24 hour freshness window)
     try {
       const cacheCheck = await fetch(
         SUPABASE_URL + '/rest/v1/recommendations_cache?cache_key=eq.' + encodeURIComponent(cacheKey) + '&select=*',
@@ -488,7 +462,7 @@ app.post('/recommendations', async (req, res) => {
         const twentyFourHours = 24 * 60 * 60 * 1000;
         if (ageMs < twentyFourHours) {
           console.log('CACHE_HIT', cacheKey);
-          logUsageEvent(device_id, city, category, 'hit'); // usage tracking — added 22 June
+          logUsageEvent(device_id, city, category, 'hit');
           return res.json(cached[0].response_data);
         }
       }
@@ -497,7 +471,7 @@ app.post('/recommendations', async (req, res) => {
     }
 
     console.log('CACHE_MISS', cacheKey);
-    logUsageEvent(device_id, city, category, 'miss'); // usage tracking — added 22 June
+    logUsageEvent(device_id, city, category, 'miss');
 
     if (category === 'essentials_info') {
       const r = await fetch('https://api.anthropic.com/v1/messages', {
@@ -557,9 +531,6 @@ app.post('/recommendations', async (req, res) => {
     });
     const data = await response.json();
 
-    // Post-hoc venue existence check — catches anything hallucinated regardless
-    // of whether it came from the upfront list or Claude's own knowledge.
-    // Fails open: if parsing/verification itself errors, leave the response untouched.
     if (VENUE_CHECK_CONFIG[category] && data.content && data.content[0] && data.content[0].text) {
       try {
         const parsed = extractJSONServer(data.content[0].text);
@@ -688,10 +659,6 @@ async function pingSupabase() {
 setInterval(pingSupabase, 3 * 24 * 60 * 60 * 1000);
 pingSupabase();
 
-// ===== Daily Usage Report & Feedback System — added 22 June =====
-// Two separate daily emails via Resend. No AI involved — simple aggregation
-// of existing Supabase data, same plain-fetch style as the rest of this file.
-
 function hours24Ago() {
   return new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
 }
@@ -748,8 +715,6 @@ async function supabaseCount(table) {
   }
 }
 
-// Fire-and-forget — never blocks or fails the actual /recommendations response,
-// same pattern as the existing saveToCache call above.
 function logUsageEvent(deviceId, city, category, cacheStatus) {
   fetch(SUPABASE_URL + '/rest/v1/usage_events', {
     method: 'POST',
@@ -893,7 +858,6 @@ async function buildFeedbackReport() {
   return { text, attachments };
 }
 
-// 04:00 UTC = 7am Riyadh / 2pm Brisbane (both fixed offsets year-round, no DST)
 cron.schedule('0 4 * * *', async () => {
   try {
     const report = await buildUsageReport();
@@ -908,7 +872,6 @@ cron.schedule('5 4 * * *', async () => {
   } catch (e) { console.error('Feedback report failed:', e.message); }
 });
 
-// Manual test endpoints — ?key=ADMIN_SECRET to view, &send=true to actually email
 app.get('/admin/daily-report', async (req, res) => {
   if (req.query.key !== process.env.ADMIN_SECRET) return res.status(403).json({ error: 'Forbidden' });
   try {
@@ -939,11 +902,6 @@ app.get('/admin/daily-feedback', async (req, res) => {
   }
 });
 
-// Essentials accuracy audit — added 22 June, prompted by the stale Brisbane
-// transport fare/go card info catching us out. Dumps every cached Essentials
-// entry's transport and currency details for quick manual spot-checking —
-// deliberately not an automated fact-checker, just a fast way to see them all
-// in one place instead of tapping through cities one by one in the app.
 app.get('/admin/essentials-audit', async (req, res) => {
   if (req.query.key !== process.env.ADMIN_SECRET) return res.status(403).json({ error: 'Forbidden' });
   try {
@@ -979,6 +937,19 @@ app.get('/admin/essentials-audit', async (req, res) => {
   } catch (e) {
     console.error(e.message);
     res.status(500).json({ error: 'Failed to build audit' });
+  }
+});
+
+app.get('/admin/coffee-candidates', async (req, res) => {
+  if (req.query.key !== process.env.ADMIN_SECRET) return res.status(403).json({ error: 'Forbidden' });
+  const city = req.query.city;
+  if (!city) return res.status(400).json({ error: 'city query param is required' });
+  try {
+    const candidates = await fetchPlacesCandidates(city, 'coffee');
+    res.json({ city, count: candidates.length, candidates });
+  } catch (e) {
+    console.error(e.message);
+    res.status(500).json({ error: 'Failed to fetch candidates' });
   }
 });
 
