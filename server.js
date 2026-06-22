@@ -23,9 +23,12 @@ app.get('/', (req, res) => {
 // Categories that get an upfront real-venue candidate list from Google Places,
 // to curate from. Radius is wider for Art/Markets since small towns often have
 // zero galleries/markets within their own boundaries (per the existing prompt
-// language for both, which already calls for regional scope).
+// language for both, which already calls for regional scope). Coffee widened
+// 22 June — local coffee scenes are genuinely deep, and a bigger pool also
+// feeds the future "near me" distance-sort, which needs candidates beyond
+// just the CBD radius.
 const PLACES_UPFRONT_CONFIG = {
-  coffee: { query: 'coffee shop', radiusMeters: 8000 },
+  coffee: { query: 'coffee shop', radiusMeters: 20000, maxPages: 2, maxCandidates: 40 },
   eating: { query: 'restaurant', radiusMeters: 8000 },
   markets: { query: 'market', radiusMeters: 30000 },
   art: { query: 'art gallery', radiusMeters: 30000 },
@@ -74,20 +77,23 @@ async function geocodeCity(city) {
 // overexposed, touristy spots this whole brand exists to avoid. If someone
 // is tempted to add ratings here later "to improve quality," don't — the fix
 // for quality problems belongs in MASTER_SYSTEM's curation rules, not here.
+//
+// Pagination added 22 June (Coffee only, via maxPages) — Google returns ~20
+// results per page; fetching a second page roughly doubles the candidate pool
+// for an extra Places API call, still only once per city per 24h cache window.
 async function fetchPlacesCandidates(city, category) {
   const config = PLACES_UPFRONT_CONFIG[category];
   if (!config) return [];
   try {
     const coords = await geocodeCity(city);
     if (!coords) return [];
-    const r = await fetch('https://places.googleapis.com/v1/places:searchText', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'X-Goog-Api-Key': process.env.GOOGLE_KEY,
-        'X-Goog-FieldMask': 'places.displayName,places.formattedAddress' // Basic tier only — see warning above, never add rating/photos
-      },
-      body: JSON.stringify({
+
+    let allPlaces = [];
+    let pageToken = null;
+    const maxPages = config.maxPages || 1;
+
+    for (let page = 0; page < maxPages; page++) {
+      const body = {
         textQuery: config.query + ' in ' + city,
         locationBias: {
           circle: {
@@ -95,14 +101,29 @@ async function fetchPlacesCandidates(city, category) {
             radius: config.radiusMeters
           }
         }
-      })
-    });
-    const d = await r.json();
-    if (!Array.isArray(d.places)) return [];
-    return d.places
+      };
+      if (pageToken) body.pageToken = pageToken;
+
+      const r = await fetch('https://places.googleapis.com/v1/places:searchText', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Goog-Api-Key': process.env.GOOGLE_KEY,
+          'X-Goog-FieldMask': 'places.displayName,places.formattedAddress,nextPageToken' // Basic tier only — see warning above, never add rating/photos
+        },
+        body: JSON.stringify(body)
+      });
+      const d = await r.json();
+      if (Array.isArray(d.places)) allPlaces = allPlaces.concat(d.places);
+      if (!d.nextPageToken) break;
+      pageToken = d.nextPageToken;
+      await new Promise(resolve => setTimeout(resolve, 2000)); // Google's page tokens need a short delay before they're valid
+    }
+
+    return allPlaces
       .map(p => ({ name: p.displayName && p.displayName.text, address: p.formattedAddress }))
       .filter(p => p.name)
-      .slice(0, 20);
+      .slice(0, config.maxCandidates || 20);
   } catch (e) {
     console.error('Places candidates error:', e.message);
     return [];
@@ -211,11 +232,12 @@ STRICT RULES FOR THIS TAB:
 - NEVER mention any cafe, restaurant, bar, bakery or food/drink outlet of any kind — transport, currency and weather ONLY
 - NEVER mention a transport operator, bus company or service you cannot confirm is currently operating
 - Always include state or region specific transport pricing where it exists (e.g. Queensland 50c flat fare, London Oyster cap)
+- If the web search context below includes what looks like an official government or public-transport-authority source (a .gov domain, or the city's actual transit authority website), treat that as the authoritative source for fares, payment methods and ticketing specifically — prioritise it over travel blogs, tourism sites, or your own training knowledge, since fare structures and payment systems change on government timelines, not yours
 - For weather: describe typical seasonal patterns only — do not exaggerate flood, cyclone or disaster risk for areas where this is uncommon. Be accurate not alarmist.
 
 Cover: CURRENCY (local currency, how locals pay, where to get cash, tipping culture, typical prices for coffee/beer/meal/taxi, money scams to avoid), WEATHER (current season implications, what to pack specifically, best and worst months with reasons, any unique weather patterns), GETTING AROUND (how locals actually travel day to day, which apps to download, transit cards, airport to city like a local, transport scams to avoid, one tip only locals know). Every price and time must be specific.
 
-Return JSON: {"cityTag":"one line poetic character description of ${city}","weather":{"temp":"","condition":"sunny|cloudy|rainy|stormy","summary":""},"currency":{"code":"","symbol":"","rate":""},"items":[{"name":"","type":"currency|weather|transport","description":""}]}`,
+Return JSON: {"cityTag":"one line poetic character description of ${city}","weather":{"range":"typical min-max temperature range for this time of year, e.g. 18-26°C","summary":"one line on typical seasonal conditions, e.g. warm and humid with afternoon storms common"},"currency":{"code":"","symbol":"","rate":""},"items":[{"name":"","type":"currency|weather|transport","description":""}]}`,
 
   neighbourhoods: (city) => `You are Localé's Neighbourhoods Agent for ${city}. Help travellers understand where to actually base themselves.
 
@@ -260,7 +282,7 @@ STRICT RULES FOR THIS TAB:
 - NEVER include tourist restaurants, chains, or places where the majority of diners are tourists
 - Use $ cheap $$ mid $$$ special for price
 - Only include dietary tags that genuinely apply: vegetarian, vegan, halal, kosher, pescatarian, glutenfree
-- Return a maximum of 7 items — curated, not comprehensive
+- There is no fixed target number of items — a city with a genuinely deep, distinctive food scene may warrant many more entries than a small town, and that's correct, not a failure to curate. Every single item must still independently earn its place against every rule above. As an absolute outer limit, never exceed roughly 15 items even in the most food-rich cities — if you find yourself wanting to include more than that, you are no longer curating, you are cataloguing.
 
 For each: name, exact neighbourhood/street, the single dish to order, price, best time (specific), whether to book, dietary flags, local tip, a precise map search term combining the venue name and street/area for accurate map lookup.
 
@@ -339,14 +361,14 @@ THIS TAB IS EXPERIENCES NOT VENUES — bars go in Drink, restaurants go in Eatin
 
 Return JSON: {"items":[{"name":"","type":"natural|cultural|atmospheric|ritual|viewpoint|landscape|music|moment","when":"","duration":"","where":"","onlyHereReason":"","localTip":"","description":""}]}`,
 
-  mustsee: (city) => `You are Localé's Must See Agent for ${city}. Answer: if someone has 24 hours and can only do 5 things, what would a knowledgeable local who loves this city tell them?
+  mustsee: (city) => `You are Localé's Must See Agent for ${city}. Answer: what would a knowledgeable local who loves this city tell a traveller they absolutely cannot miss — and what would genuinely surprise even an experienced traveller?
 
 STRICT RULES FOR THIS TAB:
 - NEVER list specific cafes, restaurants or shops
 - Include natural landmarks, significant cultural sites and genuinely unmissable experiences
-- MAXIMUM 5 recommendations
+- There is no fixed target number — a city with many genuinely unmissable and unexpected experiences may warrant more entries than a small town, and that's correct, not a failure to curate. Every single item must still independently earn its place. As an absolute outer limit, never exceed roughly 10 items even in the richest cities — if you find yourself wanting to include more than that, you are no longer curating, you are cataloguing.
 
-TWO TYPES: UNMISSABLE (world class AND locals love them) and UNEXPECTED (the thing not in any guidebook). BALANCE: at least 2 unmissable, at least 2 unexpected, at least 1 that surprises even experienced travellers. For each: name, type, why irreplaceable to THIS city, the insider version locals do it, exact location, best time (specific), realistic duration, cost, book ahead or not, the one detail that surprises (surprise).
+TWO TYPES: UNMISSABLE (world class AND locals love them) and UNEXPECTED (the thing not in any guidebook). BALANCE: at least 2 unmissable, at least 2 unexpected, at least 1 that surprises even experienced travellers — these minimums apply regardless of total count. For each: name, type, why irreplaceable to THIS city, the insider version locals do it, exact location, best time (specific), realistic duration, cost, book ahead or not, the one detail that surprises (surprise).
 
 Return JSON: {"items":[{"name":"","type":"unmissable|unexpected","why":"","localAngle":"","surprise":"","location":"","neighbourhood":"","bestTime":"","duration":"","price":"","bookAhead":false,"localTip":"","description":""}]}`
 };
@@ -354,7 +376,7 @@ Return JSON: {"items":[{"name":"","type":"unmissable|unexpected","why":"","local
 const currentYear = new Date().getFullYear();
 
 const SEARCH_QUERIES = {
-  essentials: (city) => `${city} transport currency tips locals ${currentYear}`,
+  essentials: (city) => `${city} official public transport fares tickets payment methods ${currentYear}`,
   neighbourhoods: (city) => `${city} best neighbourhoods locals live ${currentYear}`,
   coffee: (city) => `${city} best local coffee shops independent ${currentYear}`,
   food: (city) => `${city} iconic local dishes street food ${currentYear}`,
@@ -481,7 +503,7 @@ app.post('/recommendations', async (req, res) => {
           model: 'claude-sonnet-4-6',
           max_tokens: 500,
           system: 'Return only valid JSON. No markdown, no backticks, no explanation.',
-          messages: [{ role: 'user', content: `For ${city} return JSON with: {"cityTag":"one evocative line capturing this city soul","funFact":"one genuinely surprising or delightful true fact about this city that most visitors do not know","weather":{"temp":"e.g. 28°C","condition":"sunny|cloudy|rainy|stormy","summary":"one line"},"currency":{"code":"e.g. EUR","symbol":"e.g. €","rate":"e.g. 1 USD = 0.92 EUR"}}` }]
+          messages: [{ role: 'user', content: `For ${city} return JSON with: {"cityTag":"one evocative line capturing this city soul","funFact":"one genuinely surprising or delightful true fact about this city that most visitors do not know","weather":{"range":"typical min-max range for this time of year, e.g. 18-26°C","summary":"one line on typical seasonal conditions"},"currency":{"code":"e.g. EUR","symbol":"e.g. €","rate":"e.g. 1 USD = 0.92 EUR"}}` }]
         })
       });
       const d = await r.json();
@@ -765,48 +787,59 @@ async function sendResendEmail({ subject, text, attachments }) {
 async function buildUsageReport() {
   const since = hours24Ago();
 
-  const newCacheRows = await supabaseSelect('recommendations_cache', 'select=cache_key,created_at&created_at=gte.' + encodeURIComponent(since));
-  const newFavourites = await supabaseSelect('favourites', 'select=*&created_at=gte.' + encodeURIComponent(since));
   const newUsageEvents = await supabaseSelect('usage_events', 'select=*&created_at=gte.' + encodeURIComponent(since));
+  const newFavourites = await supabaseSelect('favourites', 'select=*&created_at=gte.' + encodeURIComponent(since));
+  const newCacheRows = await supabaseSelect('recommendations_cache', 'select=cache_key,created_at&created_at=gte.' + encodeURIComponent(since));
   const totalCacheRows = await supabaseCount('recommendations_cache');
   const totalFavourites = await supabaseCount('favourites');
-
-  const cityCounts = {}, categoryCounts = {}, favCategoryCounts = {};
-  newCacheRows.forEach(row => {
-    const parts = (row.cache_key || '').split('|');
-    const city = parts[0], category = parts[1];
-    cityCounts[city] = (cityCounts[city] || 0) + 1;
-    categoryCounts[category] = (categoryCounts[category] || 0) + 1;
-  });
-  newFavourites.forEach(f => {
-    favCategoryCounts[f.category] = (favCategoryCounts[f.category] || 0) + 1;
-  });
 
   const distinctDevices = new Set(newUsageEvents.filter(e => e.device_id).map(e => e.device_id));
   const hits = newUsageEvents.filter(e => e.cache_status === 'hit').length;
   const misses = newUsageEvents.filter(e => e.cache_status === 'miss').length;
 
+  const cityDemand = {}, categoryDemand = {};
+  newUsageEvents.forEach(e => {
+    if (e.city) cityDemand[e.city] = (cityDemand[e.city] || 0) + 1;
+    if (e.category) categoryDemand[e.category] = (categoryDemand[e.category] || 0) + 1;
+  });
+
+  const cityNewGen = {}, categoryNewGen = {};
+  newCacheRows.forEach(row => {
+    const parts = (row.cache_key || '').split('|');
+    const city = parts[0], category = parts[1];
+    cityNewGen[city] = (cityNewGen[city] || 0) + 1;
+    categoryNewGen[category] = (categoryNewGen[category] || 0) + 1;
+  });
+
+  const favCategoryCounts = {};
+  newFavourites.forEach(f => {
+    favCategoryCounts[f.category] = (favCategoryCounts[f.category] || 0) + 1;
+  });
+
   const sortDesc = obj => Object.entries(obj).sort((a, b) => b[1] - a[1]);
-  const topCities = sortDesc(cityCounts);
-  const topCategories = sortDesc(categoryCounts);
-  const topFavCategories = sortDesc(favCategoryCounts);
 
   const text = [
     'Localé — Daily Usage Report — ' + todayStr(),
     '',
     'LAST 24 HOURS',
     '- Total app requests logged: ' + newUsageEvents.length + ' (' + hits + ' cache hits, ' + misses + ' new generations)',
-    '- Distinct devices seen: ' + distinctDevices.size + ' (will read 0 until the App.js device_id update ships)',
+    '- Distinct devices seen: ' + distinctDevices.size,
     '- New favourites saved: ' + newFavourites.length,
     '',
-    'TOP CITIES SEARCHED (last 24h, first-time generations)',
-    topCities.map(([c, n]) => '- ' + c + ': ' + n).join('\n') || '(none)',
+    'TOP CITIES BY TOTAL DEMAND (last 24h — every request, hit or miss)',
+    sortDesc(cityDemand).map(([c, n]) => '- ' + c + ': ' + n).join('\n') || '(none yet)',
     '',
-    'TOP CATEGORIES SEARCHED (last 24h, first-time generations)',
-    topCategories.map(([c, n]) => '- ' + c + ': ' + n).join('\n') || '(none)',
+    'TOP CATEGORIES BY TOTAL DEMAND (last 24h — every request, hit or miss)',
+    sortDesc(categoryDemand).map(([c, n]) => '- ' + c + ': ' + n).join('\n') || '(none yet)',
+    '',
+    'NEW GENERATIONS BY CITY (last 24h — cost signal only, first-time searches)',
+    sortDesc(cityNewGen).map(([c, n]) => '- ' + c + ': ' + n).join('\n') || '(none)',
+    '',
+    'NEW GENERATIONS BY CATEGORY (last 24h — cost signal only, first-time searches)',
+    sortDesc(categoryNewGen).map(([c, n]) => '- ' + c + ': ' + n).join('\n') || '(none)',
     '',
     'TOP CATEGORIES FAVOURITED (last 24h)',
-    topFavCategories.map(([c, n]) => '- ' + c + ': ' + n).join('\n') || '(none)',
+    sortDesc(favCategoryCounts).map(([c, n]) => '- ' + c + ': ' + n).join('\n') || '(none)',
     '',
     'ALL-TIME TOTALS',
     '- Total city/category combos ever generated: ' + (totalCacheRows ?? 'n/a'),
@@ -895,6 +928,49 @@ app.get('/admin/daily-feedback', async (req, res) => {
   } catch (e) {
     console.error(e.message);
     return res.status(500).json({ error: 'Failed to build report' });
+  }
+});
+
+// Essentials accuracy audit — added 22 June, prompted by the stale Brisbane
+// transport fare/go card info catching us out. Dumps every cached Essentials
+// entry's transport and currency details for quick manual spot-checking —
+// deliberately not an automated fact-checker, just a fast way to see them all
+// in one place instead of tapping through cities one by one in the app.
+app.get('/admin/essentials-audit', async (req, res) => {
+  if (req.query.key !== process.env.ADMIN_SECRET) return res.status(403).json({ error: 'Forbidden' });
+  try {
+    const rows = await supabaseSelect(
+      'recommendations_cache',
+      'select=cache_key,response_data,created_at&or=(cache_key.like.*%7Cessentials,cache_key.like.*%7Cessentials_info)'
+    );
+
+    const lines = rows.map(row => {
+      const [city, category] = (row.cache_key || '').split('|');
+      let parsed = null;
+      try {
+        const text = row.response_data && row.response_data.content && row.response_data.content[0] && row.response_data.content[0].text;
+        parsed = text ? extractJSONServer(text) : null;
+      } catch (e) {
+        return city + ' [' + category + '] — could not parse (' + e.message + ')';
+      }
+      if (!parsed) return city + ' [' + category + '] — no data';
+
+      const transportItems = (parsed.items || []).filter(i => i.type === 'transport').map(i => '  - ' + i.name + ': ' + i.description);
+      const currency = parsed.currency ? (parsed.currency.code + ' ' + parsed.currency.symbol + ' (' + parsed.currency.rate + ')') : 'n/a';
+      const ageHours = Math.round((Date.now() - new Date(row.created_at).getTime()) / (60 * 60 * 1000));
+
+      return [
+        city + ' [' + category + '] — cached ' + ageHours + 'h ago',
+        '  Currency: ' + currency,
+        transportItems.length ? transportItems.join('\n') : '  (no transport items)'
+      ].join('\n');
+    });
+
+    res.set('Content-Type', 'text/plain');
+    res.send(lines.join('\n\n') || 'No essentials content cached yet.');
+  } catch (e) {
+    console.error(e.message);
+    res.status(500).json({ error: 'Failed to build audit' });
   }
 });
 
