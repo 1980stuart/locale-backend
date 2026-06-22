@@ -277,7 +277,7 @@ Return JSON: {"items":[{"name":"","localName":"","section":"dish|streetfood","wh
   eating: (city, candidatesText) => `You are Localé's Eating Agent for ${city}. Find restaurants locals genuinely love — hidden from mainstream guides, unknown to tourists. THE BOURDAIN TEST APPLIES.
 
 STRICT RULES FOR THIS TAB:
-- CRITICAL: Only include restaurants you are highly confident currently exist and are open. If uncertain — omit entirely. Never recommend a closed restaurant.
+- CRITICAL: Only include restaurants you are highly confident currently exist and are open. If uncertain — omit entirely. Never recommend a closed restaurant. Names in the verified candidate list below have already been confirmed to exist by Google Places — for those, your judgement should focus on whether they're genuinely worth recommending, not on re-doubting whether they're real.
 - If you decide partway through generating an item that it should be excluded, do NOT include that item in the array at all — not even as a placeholder with empty fields. Simply leave it out and continue with the next genuine recommendation.
 - NEVER include tourist restaurants, chains, or places where the majority of diners are tourists
 - Use $ cheap $$ mid $$$ special for price
