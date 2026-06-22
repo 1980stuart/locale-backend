@@ -237,7 +237,7 @@ STRICT RULES FOR THIS TAB:
 
 Cover: CURRENCY (local currency, how locals pay, where to get cash, tipping culture, typical prices for coffee/beer/meal/taxi, money scams to avoid), WEATHER (current season implications, what to pack specifically, best and worst months with reasons, any unique weather patterns), GETTING AROUND (how locals actually travel day to day, which apps to download, transit cards, airport to city like a local, transport scams to avoid, one tip only locals know). Every price and time must be specific.
 
-Return JSON: {"cityTag":"one line poetic character description of ${city}","weather":{"range":"typical min-max temperature range for this time of year, e.g. 18-26°C","summary":"one line on typical seasonal conditions, e.g. warm and humid with afternoon storms common"},"currency":{"code":"","symbol":"","rate":""},"items":[{"name":"","type":"currency|weather|transport","description":""}]}`,
+Return JSON: {"cityTag":"one line poetic character description of ${city}","weather":{"condition":"sunny|cloudy|rainy|stormy|windy|snowy|humid|dry|mild","summary":"one line on typical seasonal conditions, e.g. warm and humid with afternoon storms common"},"currency":{"code":"","symbol":"","rate":""},"items":[{"name":"","type":"currency|weather|transport","description":""}]}
 
   neighbourhoods: (city) => `You are Localé's Neighbourhoods Agent for ${city}. Help travellers understand where to actually base themselves.
 
