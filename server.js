@@ -471,7 +471,6 @@ app.post('/recommendations', async (req, res) => {
     }
 
     console.log('CACHE_MISS', cacheKey);
-    logUsageEvent(device_id, city, category, 'miss');
 
     if (category === 'essentials_info') {
       const r = await fetch('https://api.anthropic.com/v1/messages', {
@@ -489,6 +488,7 @@ app.post('/recommendations', async (req, res) => {
         })
       });
       const d = await r.json();
+      logUsageEvent(device_id, city, category, 'miss', d.usage);
       saveToCache(cacheKey, d);
       return res.json(d);
     }
@@ -530,6 +530,8 @@ app.post('/recommendations', async (req, res) => {
       })
     });
     const data = await response.json();
+
+    logUsageEvent(device_id, city, category, 'miss', data.usage);
 
     if (VENUE_CHECK_CONFIG[category] && data.content && data.content[0] && data.content[0].text) {
       try {
@@ -715,16 +717,36 @@ async function supabaseCount(table) {
   }
 }
 
-function logUsageEvent(deviceId, city, category, cacheStatus) {
+// Approximate Claude Sonnet pricing, USD per million tokens.
+// CONFIRM against https://platform.claude.com/docs/en/about-claude/pricing before treating this as exact —
+// pricing can change, and this estimate does NOT account for the prompt-caching discount on cache_read_input_tokens
+// (cached reads are billed at a fraction of the base input rate), so true cost is likely somewhat LOWER than this estimate.
+const PRICE_PER_MTOK_INPUT = 3.00;
+const PRICE_PER_MTOK_OUTPUT = 15.00;
+
+function estimateCostUSD(inputTokens, outputTokens) {
+  const inCost = ((inputTokens || 0) / 1e6) * PRICE_PER_MTOK_INPUT;
+  const outCost = ((outputTokens || 0) / 1e6) * PRICE_PER_MTOK_OUTPUT;
+  return inCost + outCost;
+}
+
+function logUsageEvent(deviceId, city, category, cacheStatus, usage) {
+  const body = {
+    device_id: deviceId || null,
+    city: city,
+    category: category,
+    cache_status: cacheStatus
+  };
+  if (usage) {
+    body.input_tokens = usage.input_tokens ?? null;
+    body.output_tokens = usage.output_tokens ?? null;
+    body.cache_creation_input_tokens = usage.cache_creation_input_tokens ?? null;
+    body.cache_read_input_tokens = usage.cache_read_input_tokens ?? null;
+  }
   fetch(SUPABASE_URL + '/rest/v1/usage_events', {
     method: 'POST',
     headers: { ...supabaseHeaders(), 'Prefer': 'return=minimal' },
-    body: JSON.stringify({
-      device_id: deviceId || null,
-      city: city,
-      category: category,
-      cache_status: cacheStatus
-    })
+    body: JSON.stringify(body)
   }).catch(e => console.error('usage_events insert error:', e.message));
 }
 
@@ -789,6 +811,16 @@ async function buildUsageReport() {
     favCategoryCounts[f.category] = (favCategoryCounts[f.category] || 0) + 1;
   });
 
+  // Real token/cost totals from the last 24h, based on actual Anthropic usage figures logged per call.
+  let totalInputTokens = 0, totalOutputTokens = 0, totalCacheCreationTokens = 0, totalCacheReadTokens = 0;
+  newUsageEvents.forEach(e => {
+    totalInputTokens += e.input_tokens || 0;
+    totalOutputTokens += e.output_tokens || 0;
+    totalCacheCreationTokens += e.cache_creation_input_tokens || 0;
+    totalCacheReadTokens += e.cache_read_input_tokens || 0;
+  });
+  const estimatedCost = estimateCostUSD(totalInputTokens, totalOutputTokens);
+
   const sortDesc = obj => Object.entries(obj).sort((a, b) => b[1] - a[1]);
 
   const text = [
@@ -798,6 +830,13 @@ async function buildUsageReport() {
     '- Total app requests logged: ' + newUsageEvents.length + ' (' + hits + ' cache hits, ' + misses + ' new generations)',
     '- Distinct devices seen: ' + distinctDevices.size,
     '- New favourites saved: ' + newFavourites.length,
+    '',
+    'CLAUDE API COST (last 24h — real figures from Anthropic, not estimated counts)',
+    '- Input tokens: ' + totalInputTokens.toLocaleString(),
+    '- Output tokens: ' + totalOutputTokens.toLocaleString(),
+    '- Cache creation tokens: ' + totalCacheCreationTokens.toLocaleString() + ' (written to prompt cache)',
+    '- Cache read tokens: ' + totalCacheReadTokens.toLocaleString() + ' (served from prompt cache, billed at a discount not reflected below)',
+    '- Estimated cost: $' + estimatedCost.toFixed(2) + ' USD (base input/output rates only — actual cost is likely somewhat lower due to the cache-read discount; verify current per-token pricing before treating this as exact)',
     '',
     'TOP CITIES BY TOTAL DEMAND (last 24h — every request, hit or miss)',
     sortDesc(cityDemand).map(([c, n]) => '- ' + c + ': ' + n).join('\n') || '(none yet)',
@@ -822,7 +861,7 @@ async function buildUsageReport() {
   ].join('\n');
 
   const attachments = [
-    { filename: 'usage_events_' + todayStr() + '.csv', content: Buffer.from(toCSV(newUsageEvents, ['device_id', 'city', 'category', 'cache_status', 'created_at'])).toString('base64') },
+    { filename: 'usage_events_' + todayStr() + '.csv', content: Buffer.from(toCSV(newUsageEvents, ['device_id', 'city', 'category', 'cache_status', 'input_tokens', 'output_tokens', 'cache_creation_input_tokens', 'cache_read_input_tokens', 'created_at'])).toString('base64') },
     { filename: 'favourites_' + todayStr() + '.csv', content: Buffer.from(toCSV(newFavourites, ['device_id', 'city', 'category', 'item_name', 'created_at'])).toString('base64') }
   ];
 
