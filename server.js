@@ -747,7 +747,19 @@ function logUsageEvent(deviceId, city, category, cacheStatus, usage) {
     method: 'POST',
     headers: { ...supabaseHeaders(), 'Prefer': 'return=minimal' },
     body: JSON.stringify(body)
-  }).catch(e => console.error('usage_events insert error:', e.message));
+  })
+    .then(async (r) => {
+      // fetch() only rejects on network failures — it does NOT reject on
+      // HTTP error responses (400/403/etc). Without this check, a rejected
+      // insert (e.g. an RLS policy blocking it) resolves "successfully" and
+      // silently vanishes — no exception, nothing in the .catch() below, no
+      // log line anywhere. This is what was actually happening on 24 June.
+      if (!r.ok) {
+        const errText = await r.text();
+        console.error('usage_events insert REJECTED:', r.status, errText);
+      }
+    })
+    .catch(e => console.error('usage_events insert network error:', e.message));
 }
 
 async function sendResendEmail({ subject, text, attachments }) {
