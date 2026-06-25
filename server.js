@@ -688,9 +688,17 @@ async function supabaseSelect(table, queryParams) {
       headers: supabaseHeaders()
     });
     const data = await r.json();
-    return Array.isArray(data) ? data : [];
+    // Same silent-failure class as the original usage_events insert bug:
+    // a rejected/errored Supabase response is still valid JSON, just not an
+    // array — without this check, that error object gets quietly discarded
+    // and every caller sees "no rows" instead of "something went wrong."
+    if (!Array.isArray(data)) {
+      console.error('Supabase select REJECTED (' + table + '):', r.status, JSON.stringify(data));
+      return [];
+    }
+    return data;
   } catch (e) {
-    console.error('Supabase select error (' + table + '):', e.message);
+    console.error('Supabase select network error (' + table + '):', e.message);
     return [];
   }
 }
@@ -705,6 +713,11 @@ async function supabaseCount(table) {
         'Range': '0-0'
       }
     });
+    if (!r.ok) {
+      const errText = await r.text();
+      console.error('Supabase count REJECTED (' + table + '):', r.status, errText);
+      return null;
+    }
     const range = r.headers.get('content-range');
     if (range && range.includes('/')) {
       const total = range.split('/')[1];
@@ -712,7 +725,7 @@ async function supabaseCount(table) {
     }
     return null;
   } catch (e) {
-    console.error('Supabase count error (' + table + '):', e.message);
+    console.error('Supabase count network error (' + table + '):', e.message);
     return null;
   }
 }
