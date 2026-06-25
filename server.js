@@ -471,6 +471,7 @@ app.post('/recommendations', async (req, res) => {
     }
 
     console.log('CACHE_MISS', cacheKey);
+    const t0 = Date.now();
 
     if (category === 'essentials_info') {
       const r = await fetch('https://api.anthropic.com/v1/messages', {
@@ -488,6 +489,7 @@ app.post('/recommendations', async (req, res) => {
         })
       });
       const d = await r.json();
+      console.log('TIMING', cacheKey, 'total=' + (Date.now() - t0) + 'ms (essentials_info, single Claude call)');
       logUsageEvent(device_id, city, category, 'miss', d.usage);
       saveToCache(cacheKey, d);
       return res.json(d);
@@ -503,8 +505,11 @@ app.post('/recommendations', async (req, res) => {
       const candidates = await fetchPlacesCandidates(city, category);
       candidatesText = candidatesToPromptText(candidates);
     }
+    const tAfterPlaces = Date.now();
 
     const searchContext = await fetchSearchContext(city, category);
+    const tAfterSearch = Date.now();
+
     const response = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
       headers: {
@@ -530,6 +535,7 @@ app.post('/recommendations', async (req, res) => {
       })
     });
     const data = await response.json();
+    const tAfterClaude = Date.now();
 
     logUsageEvent(device_id, city, category, 'miss', data.usage);
 
@@ -548,6 +554,16 @@ app.post('/recommendations', async (req, res) => {
         console.error('Post-hoc verification error:', e.message);
       }
     }
+    const tAfterVerify = Date.now();
+
+    console.log(
+      'TIMING', cacheKey,
+      'places=' + (tAfterPlaces - t0) + 'ms',
+      'search=' + (tAfterSearch - tAfterPlaces) + 'ms',
+      'claude=' + (tAfterClaude - tAfterSearch) + 'ms',
+      'verify=' + (tAfterVerify - tAfterClaude) + 'ms',
+      'total=' + (tAfterVerify - t0) + 'ms'
+    );
 
     saveToCache(cacheKey, data);
     res.json(data);
