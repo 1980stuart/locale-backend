@@ -645,6 +645,31 @@ app.post('/feedback', async (req, res) => {
   }
 });
 
+// Outbound click tracking — added 25 June for monetisation visibility.
+// Fire-and-forget from the app's side; this endpoint itself responds fast
+// and never blocks the user's actual link from opening.
+app.post('/clicks', async (req, res) => {
+  try {
+    const { device_id, city, category, item_name, link_type } = req.body;
+    if (!city || !category || !item_name || !link_type) {
+      return res.status(400).json({ error: 'city, category, item_name, link_type are required' });
+    }
+    const r = await fetch(SUPABASE_URL + '/rest/v1/click_events', {
+      method: 'POST',
+      headers: { ...supabaseHeaders(), 'Prefer': 'return=minimal' },
+      body: JSON.stringify({ device_id, city, category, item_name, link_type })
+    });
+    if (!r.ok) {
+      const errText = await r.text();
+      console.error('click_events insert REJECTED:', r.status, errText);
+    }
+    res.json({ status: 'logged' });
+  } catch(e) {
+    console.error('click_events insert network error:', e.message);
+    res.json({ status: 'logged' }); // never surface a tracking failure to the app itself
+  }
+});
+
 async function pingSupabase() {
   try {
     await fetch(SUPABASE_URL + '/rest/v1/keepalive', {
@@ -810,8 +835,10 @@ async function buildUsageReport() {
   const newUsageEvents = await supabaseSelect('usage_events', 'select=*&created_at=gte.' + encodeURIComponent(since));
   const newFavourites = await supabaseSelect('favourites', 'select=*&created_at=gte.' + encodeURIComponent(since));
   const newCacheRows = await supabaseSelect('recommendations_cache', 'select=cache_key,created_at&created_at=gte.' + encodeURIComponent(since));
+  const newClicks = await supabaseSelect('click_events', 'select=*&created_at=gte.' + encodeURIComponent(since));
   const totalCacheRows = await supabaseCount('recommendations_cache');
   const totalFavourites = await supabaseCount('favourites');
+  const totalClicks = await supabaseCount('click_events');
 
   const distinctDevices = new Set(newUsageEvents.filter(e => e.device_id).map(e => e.device_id));
   const hits = newUsageEvents.filter(e => e.cache_status === 'hit').length;
@@ -836,6 +863,13 @@ async function buildUsageReport() {
     favCategoryCounts[f.category] = (favCategoryCounts[f.category] || 0) + 1;
   });
 
+  // Outbound click tracking — added 25 June, the key monetisation-readiness signal.
+  const clicksByCategory = {}, clicksByType = {};
+  newClicks.forEach(c => {
+    if (c.category) clicksByCategory[c.category] = (clicksByCategory[c.category] || 0) + 1;
+    if (c.link_type) clicksByType[c.link_type] = (clicksByType[c.link_type] || 0) + 1;
+  });
+
   // Real token/cost totals from the last 24h, based on actual Anthropic usage figures logged per call.
   let totalInputTokens = 0, totalOutputTokens = 0, totalCacheCreationTokens = 0, totalCacheReadTokens = 0;
   newUsageEvents.forEach(e => {
@@ -845,6 +879,7 @@ async function buildUsageReport() {
     totalCacheReadTokens += e.cache_read_input_tokens || 0;
   });
   const estimatedCost = estimateCostUSD(totalInputTokens, totalOutputTokens);
+  const costPerDevice = distinctDevices.size > 0 ? (estimatedCost / distinctDevices.size) : null;
 
   const sortDesc = obj => Object.entries(obj).sort((a, b) => b[1] - a[1]);
 
@@ -862,6 +897,14 @@ async function buildUsageReport() {
     '- Cache creation tokens: ' + totalCacheCreationTokens.toLocaleString() + ' (written to prompt cache)',
     '- Cache read tokens: ' + totalCacheReadTokens.toLocaleString() + ' (served from prompt cache, billed at a discount not reflected below)',
     '- Estimated cost: $' + estimatedCost.toFixed(2) + ' USD (base input/output rates only — actual cost is likely somewhat lower due to the cache-read discount; verify current per-token pricing before treating this as exact)',
+    '- Estimated cost per active device: ' + (costPerDevice !== null ? '$' + costPerDevice.toFixed(4) : 'n/a (no devices seen)') + ' — worth watching the trend over weeks, not any single day\'s number',
+    '',
+    'OUTBOUND CLICKS (last 24h — the key monetisation-readiness signal)',
+    '- Total outbound clicks: ' + newClicks.length + ' (all-time: ' + (totalClicks ?? 'n/a') + ')',
+    'By category:',
+    sortDesc(clicksByCategory).map(([c, n]) => '  - ' + c + ': ' + n).join('\n') || '  (none yet)',
+    'By link type:',
+    sortDesc(clicksByType).map(([c, n]) => '  - ' + c + ': ' + n).join('\n') || '  (none yet)',
     '',
     'TOP CITIES BY TOTAL DEMAND (last 24h — every request, hit or miss)',
     sortDesc(cityDemand).map(([c, n]) => '- ' + c + ': ' + n).join('\n') || '(none yet)',
@@ -881,13 +924,15 @@ async function buildUsageReport() {
     'ALL-TIME TOTALS',
     '- Total city/category combos ever generated: ' + (totalCacheRows ?? 'n/a'),
     '- Total favourites ever saved: ' + (totalFavourites ?? 'n/a'),
+    '- Total outbound clicks ever logged: ' + (totalClicks ?? 'n/a'),
     '',
     'Full row-level data attached as CSV.'
   ].join('\n');
 
   const attachments = [
     { filename: 'usage_events_' + todayStr() + '.csv', content: Buffer.from(toCSV(newUsageEvents, ['device_id', 'city', 'category', 'cache_status', 'input_tokens', 'output_tokens', 'cache_creation_input_tokens', 'cache_read_input_tokens', 'created_at'])).toString('base64') },
-    { filename: 'favourites_' + todayStr() + '.csv', content: Buffer.from(toCSV(newFavourites, ['device_id', 'city', 'category', 'item_name', 'created_at'])).toString('base64') }
+    { filename: 'favourites_' + todayStr() + '.csv', content: Buffer.from(toCSV(newFavourites, ['device_id', 'city', 'category', 'item_name', 'created_at'])).toString('base64') },
+    { filename: 'click_events_' + todayStr() + '.csv', content: Buffer.from(toCSV(newClicks, ['device_id', 'city', 'category', 'item_name', 'link_type', 'created_at'])).toString('base64') }
   ];
 
   return { text, attachments };
