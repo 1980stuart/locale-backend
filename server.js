@@ -924,16 +924,12 @@ async function buildFeedbackReport() {
 
 cron.schedule('0 4 * * *', async () => {
   try {
-    const report = await buildUsageReport();
-    await sendResendEmail({ subject: 'Localé Usage Report — ' + todayStr(), text: report.text, attachments: report.attachments });
-  } catch (e) { console.error('Usage report failed:', e.message); }
-});
-
-cron.schedule('5 4 * * *', async () => {
-  try {
-    const report = await buildFeedbackReport();
-    await sendResendEmail({ subject: 'Localé Feedback — ' + todayStr(), text: report.text, attachments: report.attachments });
-  } catch (e) { console.error('Feedback report failed:', e.message); }
+    const usage = await buildUsageReport();
+    const feedback = await buildFeedbackReport();
+    const combinedText = usage.text + '\n\n' + '='.repeat(40) + '\n\n' + feedback.text;
+    const combinedAttachments = [...usage.attachments, ...feedback.attachments];
+    await sendResendEmail({ subject: 'Localé Daily Report — ' + todayStr(), text: combinedText, attachments: combinedAttachments });
+  } catch (e) { console.error('Daily report failed:', e.message); }
 });
 
 app.get('/admin/daily-report', async (req, res) => {
