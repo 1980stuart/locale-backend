@@ -194,7 +194,21 @@ ALWAYS:
 - Be specific about location within the city — which neighbourhood, which street
 - Include the single best thing to do, order or see at each recommendation
 - Flag if something is seasonal, time-sensitive or requires booking ahead
-- Write as if you are a trusted local friend, not a travel writer`;
+- Write as if you are a trusted local friend, not a travel writer
+
+SCALING THE STANDARD TO THE CITY
+"Genuinely excellent" does not mean "world-famous." In a city of 30 million, the bar for inclusion is necessarily different from a town of 30,000. Apply the same principles — Local Over Tourist, Earned Over Bought — but calibrate the result to what genuinely exists in this specific place. A small town's best bakery does not need to rival a capital city's best bakery to belong in Localé; it only needs to be the genuine, locally-loved best of what is actually there. Never inflate a small town's offering to sound more impressive than it is, and never apply a megacity's density of options as an expectation for a place that simply does not have that many options.
+
+WORKED EXAMPLES — THE BOURDAIN TEST IN PRACTICE
+PASSES: a noodle stall under a flyover that's been run by the same family for thirty years, where the queue is entirely local office workers on their lunch break. FAILS: a noodle restaurant that's beautifully renovated, frequently photographed for Instagram, and primarily filled with visitors holding phones up to their food.
+PASSES: a neighbourhood bar with no sign, found by word of mouth, where the bartender remembers regulars' usual order. FAILS: a bar that markets itself as "where the locals go" — genuine local spots do not need to claim it.
+PASSES: a market that smells like the actual produce of the region, loud and slightly chaotic, used by people doing their weekly shop. FAILS: a market rebuilt for tourists with fixed-price stalls and souvenir vendors.
+
+COMMON FAILURE PATTERNS TO AVOID
+- Recommending a venue because it has a polished website or active social media — visibility is not the same as local love.
+- Assuming a place is still locally loved just because it once was; ownership and reputation change, verify current standing, not historical standing.
+- Treating "highly rated online" as a proxy for "locally loved" — these frequently diverge, and that gap is exactly what Localé exists to surface.
+- Defaulting to the most famous or most central example of a category when a less central, less famous one would better pass the Bourdain Test.`;
 
 const PROMPTS = {
   essentials: (city) => `You are Localé's Essentials Agent for ${city}. Give a traveller the critical practical knowledge they need to navigate this city like a local.
@@ -403,6 +417,122 @@ function extractJSONServer(text) {
   return JSON.parse(cleaned);
 }
 
+// Core generation logic, extracted 26 June so both the live /recommendations
+// route AND the background pre-warm job can share exactly one implementation
+// instead of two copies drifting apart. Always generates fresh and saves to
+// cache — never checks whether a cache entry already exists; that decision
+// stays with whoever calls this (the route checks freshness before calling
+// at all; the pre-warm job checks age via cacheAgeHours() before calling).
+// `source` is purely a logging/attribution tag — 'miss' for real user-driven
+// generations, 'prewarm' for background-job-driven ones — so the daily
+// report can tell real demand apart from background activity.
+async function generateRecommendation(city, category, { deviceId = null, source = 'miss' } = {}) {
+  const cacheKey = city.trim().toLowerCase() + '|' + category;
+  const t0 = Date.now();
+  const tag = source !== 'miss' ? ' [' + source + ']' : '';
+
+  if (category === 'essentials_info') {
+    const r = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': process.env.ANTHROPIC_KEY,
+        'anthropic-version': '2023-06-01'
+      },
+      body: JSON.stringify({
+        model: 'claude-sonnet-4-6',
+        max_tokens: 500,
+        system: 'Return only valid JSON. No markdown, no backticks, no explanation.',
+        messages: [{ role: 'user', content: `For ${city} return JSON with: {"cityTag":"one evocative line capturing this city soul","funFact":"one genuinely surprising or delightful true fact about this city that most visitors do not know","weather":{"condition":"sunny|cloudy|rainy|stormy|windy|snowy|humid|dry|mild","summary":"one line on typical seasonal conditions"},"currency":{"code":"e.g. EUR","symbol":"e.g. €","rate":"e.g. 1 USD = 0.92 EUR"}}` }]
+      })
+    });
+    const d = await r.json();
+    console.log('TIMING', cacheKey, 'total=' + (Date.now() - t0) + 'ms (essentials_info, single Claude call)' + tag);
+    logUsageEvent(deviceId, city, category, source, d.usage);
+    saveToCache(cacheKey, d);
+    return d;
+  }
+
+  const promptFn = PROMPTS[category];
+  if (!promptFn) return null;
+
+  let candidatesText = '';
+  if (PLACES_UPFRONT_CONFIG[category]) {
+    const candidates = await fetchPlacesCandidates(city, category);
+    candidatesText = candidatesToPromptText(candidates);
+  }
+  const tAfterPlaces = Date.now();
+
+  const searchContext = await fetchSearchContext(city, category);
+  const tAfterSearch = Date.now();
+
+  const response = await fetch('https://api.anthropic.com/v1/messages', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'x-api-key': process.env.ANTHROPIC_KEY,
+      'anthropic-version': '2023-06-01'
+    },
+    body: JSON.stringify({
+      model: 'claude-sonnet-4-6',
+      max_tokens: 8000,
+      system: [
+        {
+          type: 'text',
+          text: MASTER_SYSTEM
+        },
+        {
+          type: 'text',
+          // Cache breakpoint moved here (26 June) — this is the LAST system
+          // block whose content is identical across every single call, so
+          // per Anthropic's caching rules the breakpoint belongs here, not
+          // on MASTER_SYSTEM alone, to cover both static blocks as one
+          // cached unit. MASTER_SYSTEM was also expanded the same day with
+          // the scaling/worked-examples/failure-patterns sections specifically
+          // so the combined static prefix clears Sonnet 4.6's 1,024-token
+          // minimum cacheable length with real margin.
+          text: 'Return only valid JSON. No markdown, no backticks, no explanation. Do not add any text, notes, or commentary before or after the JSON object — including notes about items you excluded or chose not to include. If you have low confidence in finding genuine results for this city/category, or can only confidently verify a small number of items, include a "note" field at the top level of the JSON object (alongside "items") explaining this briefly and honestly to the traveller — for example: {"note":"Only one coffee shop could be confidently verified as currently open in this town — fewer options exist here than in larger cities.","items":[...]}. Never write this explanation as plain text outside the JSON object.',
+          cache_control: { type: 'ephemeral' }
+        }
+      ],
+      messages: [{ role: 'user', content: PROMPTS[category](city, candidatesText) + searchContext }]
+    })
+  });
+  const data = await response.json();
+  const tAfterClaude = Date.now();
+
+  logUsageEvent(deviceId, city, category, source, data.usage);
+
+  if (VENUE_CHECK_CONFIG[category] && data.content && data.content[0] && data.content[0].text) {
+    try {
+      const parsed = extractJSONServer(data.content[0].text);
+      if (parsed.items && Array.isArray(parsed.items)) {
+        const beforeCount = parsed.items.length;
+        parsed.items = await verifyItemsExist(parsed.items, city, category);
+        if (parsed.items.length < beforeCount) {
+          console.log('VENUE_CHECK', category, city, beforeCount - parsed.items.length, 'item(s) removed');
+        }
+        data.content[0].text = JSON.stringify(parsed);
+      }
+    } catch (e) {
+      console.error('Post-hoc verification error:', e.message);
+    }
+  }
+  const tAfterVerify = Date.now();
+
+  console.log(
+    'TIMING', cacheKey,
+    'places=' + (tAfterPlaces - t0) + 'ms',
+    'search=' + (tAfterSearch - tAfterPlaces) + 'ms',
+    'claude=' + (tAfterClaude - tAfterSearch) + 'ms',
+    'verify=' + (tAfterVerify - tAfterClaude) + 'ms',
+    'total=' + (tAfterVerify - t0) + 'ms' + tag
+  );
+
+  saveToCache(cacheKey, data);
+  return data;
+}
+
 app.post('/claude', async (req, res) => {
   try {
     const response = await fetch('https://api.anthropic.com/v1/messages', {
@@ -472,101 +602,10 @@ app.post('/recommendations', async (req, res) => {
     }
 
     console.log('CACHE_MISS', cacheKey);
-    const t0 = Date.now();
-
-    if (category === 'essentials_info') {
-      const r = await fetch('https://api.anthropic.com/v1/messages', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-api-key': process.env.ANTHROPIC_KEY,
-          'anthropic-version': '2023-06-01'
-        },
-        body: JSON.stringify({
-          model: 'claude-sonnet-4-6',
-          max_tokens: 500,
-          system: 'Return only valid JSON. No markdown, no backticks, no explanation.',
-          messages: [{ role: 'user', content: `For ${city} return JSON with: {"cityTag":"one evocative line capturing this city soul","funFact":"one genuinely surprising or delightful true fact about this city that most visitors do not know","weather":{"condition":"sunny|cloudy|rainy|stormy|windy|snowy|humid|dry|mild","summary":"one line on typical seasonal conditions"},"currency":{"code":"e.g. EUR","symbol":"e.g. €","rate":"e.g. 1 USD = 0.92 EUR"}}` }]
-        })
-      });
-      const d = await r.json();
-      console.log('TIMING', cacheKey, 'total=' + (Date.now() - t0) + 'ms (essentials_info, single Claude call)');
-      logUsageEvent(device_id, city, category, 'miss', d.usage);
-      saveToCache(cacheKey, d);
-      return res.json(d);
-    }
-
-    const promptFn = PROMPTS[category];
-    if (!promptFn) {
+    const data = await generateRecommendation(city, category, { deviceId: device_id, source: 'miss' });
+    if (data === null) {
       return res.status(400).json({ error: 'Unknown category: ' + category });
     }
-
-    let candidatesText = '';
-    if (PLACES_UPFRONT_CONFIG[category]) {
-      const candidates = await fetchPlacesCandidates(city, category);
-      candidatesText = candidatesToPromptText(candidates);
-    }
-    const tAfterPlaces = Date.now();
-
-    const searchContext = await fetchSearchContext(city, category);
-    const tAfterSearch = Date.now();
-
-    const response = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': process.env.ANTHROPIC_KEY,
-        'anthropic-version': '2023-06-01'
-      },
-      body: JSON.stringify({
-        model: 'claude-sonnet-4-6',
-        max_tokens: 8000,
-        system: [
-          {
-            type: 'text',
-            text: MASTER_SYSTEM,
-            cache_control: { type: 'ephemeral' }
-          },
-          {
-            type: 'text',
-            text: 'Return only valid JSON. No markdown, no backticks, no explanation. Do not add any text, notes, or commentary before or after the JSON object — including notes about items you excluded or chose not to include. If you have low confidence in finding genuine results for this city/category, or can only confidently verify a small number of items, include a "note" field at the top level of the JSON object (alongside "items") explaining this briefly and honestly to the traveller — for example: {"note":"Only one coffee shop could be confidently verified as currently open in this town — fewer options exist here than in larger cities.","items":[...]}. Never write this explanation as plain text outside the JSON object.'
-          }
-        ],
-        messages: [{ role: 'user', content: PROMPTS[category](city, candidatesText) + searchContext }]
-      })
-    });
-    const data = await response.json();
-    const tAfterClaude = Date.now();
-
-    logUsageEvent(device_id, city, category, 'miss', data.usage);
-
-    if (VENUE_CHECK_CONFIG[category] && data.content && data.content[0] && data.content[0].text) {
-      try {
-        const parsed = extractJSONServer(data.content[0].text);
-        if (parsed.items && Array.isArray(parsed.items)) {
-          const beforeCount = parsed.items.length;
-          parsed.items = await verifyItemsExist(parsed.items, city, category);
-          if (parsed.items.length < beforeCount) {
-            console.log('VENUE_CHECK', category, city, beforeCount - parsed.items.length, 'item(s) removed');
-          }
-          data.content[0].text = JSON.stringify(parsed);
-        }
-      } catch (e) {
-        console.error('Post-hoc verification error:', e.message);
-      }
-    }
-    const tAfterVerify = Date.now();
-
-    console.log(
-      'TIMING', cacheKey,
-      'places=' + (tAfterPlaces - t0) + 'ms',
-      'search=' + (tAfterSearch - tAfterPlaces) + 'ms',
-      'claude=' + (tAfterClaude - tAfterSearch) + 'ms',
-      'verify=' + (tAfterVerify - tAfterClaude) + 'ms',
-      'total=' + (tAfterVerify - t0) + 'ms'
-    );
-
-    saveToCache(cacheKey, data);
     res.json(data);
   } catch(e) {
     res.status(500).json({ error: e.message });
@@ -684,6 +723,33 @@ app.post('/clicks', async (req, res) => {
   } catch(e) {
     console.error('click_events insert network error:', e.message);
     res.json({ status: 'logged' }); // never surface a tracking failure to the app itself
+  }
+});
+
+// Tab-open tracking — added 26 June. Captures which tabs people actually
+// open (regardless of whether the content was preloaded or fetched fresh),
+// since that's the data needed to make an informed lazy-load decision later
+// — the existing usage_events log only shows what got GENERATED, not what
+// anyone actually looked at. Same fire-and-forget pattern as /clicks.
+app.post('/tab-opens', async (req, res) => {
+  try {
+    const { device_id, city, category } = req.body;
+    if (!city || !category) {
+      return res.status(400).json({ error: 'city and category are required' });
+    }
+    const r = await fetch(SUPABASE_URL + '/rest/v1/tab_opens', {
+      method: 'POST',
+      headers: { ...supabaseHeaders(), 'Prefer': 'return=minimal' },
+      body: JSON.stringify({ device_id, city, category })
+    });
+    if (!r.ok) {
+      const errText = await r.text();
+      console.error('tab_opens insert REJECTED:', r.status, errText);
+    }
+    res.json({ status: 'logged' });
+  } catch(e) {
+    console.error('tab_opens insert network error:', e.message);
+    res.json({ status: 'logged' });
   }
 });
 
@@ -853,16 +919,25 @@ async function buildUsageReport() {
   const newFavourites = await supabaseSelect('favourites', 'select=*&created_at=gte.' + encodeURIComponent(since));
   const newCacheRows = await supabaseSelect('recommendations_cache', 'select=cache_key,created_at&created_at=gte.' + encodeURIComponent(since));
   const newClicks = await supabaseSelect('click_events', 'select=*&created_at=gte.' + encodeURIComponent(since));
+  const newTabOpens = await supabaseSelect('tab_opens', 'select=*&created_at=gte.' + encodeURIComponent(since));
   const totalCacheRows = await supabaseCount('recommendations_cache');
   const totalFavourites = await supabaseCount('favourites');
   const totalClicks = await supabaseCount('click_events');
 
-  const distinctDevices = new Set(newUsageEvents.filter(e => e.device_id).map(e => e.device_id));
-  const hits = newUsageEvents.filter(e => e.cache_status === 'hit').length;
-  const misses = newUsageEvents.filter(e => e.cache_status === 'miss').length;
+  // Split real user-driven events from background pre-warm activity (added
+  // 26 June) BEFORE computing any "demand" stats — otherwise the pre-warm
+  // job's own background generations would quietly inflate city/category
+  // demand figures and make them look more popular than real users ever
+  // made them, defeating the entire point of keeping these signals separate.
+  const realUsageEvents = newUsageEvents.filter(e => e.cache_status !== 'prewarm');
+  const prewarmEvents = newUsageEvents.filter(e => e.cache_status === 'prewarm');
+
+  const distinctDevices = new Set(realUsageEvents.filter(e => e.device_id).map(e => e.device_id));
+  const hits = realUsageEvents.filter(e => e.cache_status === 'hit').length;
+  const misses = realUsageEvents.filter(e => e.cache_status === 'miss').length;
 
   const cityDemand = {}, categoryDemand = {};
-  newUsageEvents.forEach(e => {
+  realUsageEvents.forEach(e => {
     if (e.city) cityDemand[e.city] = (cityDemand[e.city] || 0) + 1;
     if (e.category) categoryDemand[e.category] = (categoryDemand[e.category] || 0) + 1;
   });
@@ -887,7 +962,28 @@ async function buildUsageReport() {
     if (c.link_type) clicksByType[c.link_type] = (clicksByType[c.link_type] || 0) + 1;
   });
 
+  // Tab engagement — added 26 June. The key signal for any future lazy-load
+  // decision: what fraction of real searches actually opened each tab,
+  // versus the 100%-by-design preload-everything figure categoryDemand
+  // would otherwise show. searchesCount approximates total searches via
+  // essentials_info, which fires exactly once per real (non-prewarm) search
+  // regardless of how many tabs anyone goes on to open.
+  const searchesCount = realUsageEvents.filter(e => e.category === 'essentials_info').length;
+  const tabOpensByCategory = {};
+  newTabOpens.forEach(o => {
+    if (o.category) tabOpensByCategory[o.category] = (tabOpensByCategory[o.category] || 0) + 1;
+  });
+  const PRELOAD_CATEGORY_KEYS = ['essentials', 'neighbourhoods', 'coffee', 'food', 'eating', 'markets', 'art', 'walk', 'events', 'drink', 'night', 'mustsee'];
+  const tabEngagementLines = PRELOAD_CATEGORY_KEYS.map(cat => {
+    const opens = tabOpensByCategory[cat] || 0;
+    const rate = searchesCount > 0 ? ((opens / searchesCount) * 100).toFixed(1) + '%' : 'n/a';
+    return '  - ' + cat + ': ' + opens + ' open(s) (' + rate + ' of searches)';
+  }).join('\n');
+
   // Real token/cost totals from the last 24h, based on actual Anthropic usage figures logged per call.
+  // Deliberately includes EVERYTHING (real + prewarm) so this remains the true total cost figure that
+  // should match Anthropic's actual bill — the PRE-WARM ACTIVITY section below breaks out how much of
+  // this total came from background activity specifically, so nothing here is hidden, just itemised.
   let totalInputTokens = 0, totalOutputTokens = 0, totalCacheCreationTokens = 0, totalCacheReadTokens = 0;
   newUsageEvents.forEach(e => {
     totalInputTokens += e.input_tokens || 0;
@@ -898,17 +994,26 @@ async function buildUsageReport() {
   const estimatedCost = estimateCostUSD(totalInputTokens, totalOutputTokens);
   const costPerDevice = distinctDevices.size > 0 ? (estimatedCost / distinctDevices.size) : null;
 
+  let prewarmInputTokens = 0, prewarmOutputTokens = 0;
+  prewarmEvents.forEach(e => {
+    prewarmInputTokens += e.input_tokens || 0;
+    prewarmOutputTokens += e.output_tokens || 0;
+  });
+  const prewarmCost = estimateCostUSD(prewarmInputTokens, prewarmOutputTokens);
+  const prewarmByCity = {};
+  prewarmEvents.forEach(e => { if (e.city) prewarmByCity[e.city] = (prewarmByCity[e.city] || 0) + 1; });
+
   const sortDesc = obj => Object.entries(obj).sort((a, b) => b[1] - a[1]);
 
   const text = [
     'Localé — Daily Usage Report — ' + todayStr(),
     '',
-    'LAST 24 HOURS',
-    '- Total app requests logged: ' + newUsageEvents.length + ' (' + hits + ' cache hits, ' + misses + ' new generations)',
+    'LAST 24 HOURS (real user activity only — excludes background pre-warm)',
+    '- Total app requests logged: ' + realUsageEvents.length + ' (' + hits + ' cache hits, ' + misses + ' new generations)',
     '- Distinct devices seen: ' + distinctDevices.size,
     '- New favourites saved: ' + newFavourites.length,
     '',
-    'CLAUDE API COST (last 24h — real figures from Anthropic, not estimated counts)',
+    'CLAUDE API COST (last 24h — TOTAL real figures from Anthropic, includes pre-warm; see PRE-WARM ACTIVITY below for the split)',
     '- Input tokens: ' + totalInputTokens.toLocaleString(),
     '- Output tokens: ' + totalOutputTokens.toLocaleString(),
     '- Cache creation tokens: ' + totalCacheCreationTokens.toLocaleString() + ' (written to prompt cache)',
@@ -923,20 +1028,30 @@ async function buildUsageReport() {
     'By link type:',
     sortDesc(clicksByType).map(([c, n]) => '  - ' + c + ': ' + n).join('\n') || '  (none yet)',
     '',
-    'TOP CITIES BY TOTAL DEMAND (last 24h — every request, hit or miss)',
+    'TAB ENGAGEMENT (last 24h — % of real searches that opened each tab; the key signal for any future lazy-load decision)',
+    '- Total searches (approx, via essentials_info): ' + searchesCount,
+    tabEngagementLines || '  (no data yet)',
+    '',
+    'TOP CITIES BY TOTAL DEMAND (last 24h — real user activity only, every request hit or miss)',
     sortDesc(cityDemand).map(([c, n]) => '- ' + c + ': ' + n).join('\n') || '(none yet)',
     '',
-    'TOP CATEGORIES BY TOTAL DEMAND (last 24h — every request, hit or miss)',
+    'TOP CATEGORIES BY TOTAL DEMAND (last 24h — real user activity only, every request hit or miss)',
     sortDesc(categoryDemand).map(([c, n]) => '- ' + c + ': ' + n).join('\n') || '(none yet)',
     '',
-    'NEW GENERATIONS BY CITY (last 24h — cost signal only, first-time searches)',
+    'NEW GENERATIONS BY CITY (last 24h — cost signal only, first-time searches, includes pre-warm)',
     sortDesc(cityNewGen).map(([c, n]) => '- ' + c + ': ' + n).join('\n') || '(none)',
     '',
-    'NEW GENERATIONS BY CATEGORY (last 24h — cost signal only, first-time searches)',
+    'NEW GENERATIONS BY CATEGORY (last 24h — cost signal only, first-time searches, includes pre-warm)',
     sortDesc(categoryNewGen).map(([c, n]) => '- ' + c + ': ' + n).join('\n') || '(none)',
     '',
     'TOP CATEGORIES FAVOURITED (last 24h)',
     sortDesc(favCategoryCounts).map(([c, n]) => '- ' + c + ': ' + n).join('\n') || '(none)',
+    '',
+    'PRE-WARM ACTIVITY (last 24h — background refresh job; NOT real user demand, see manual for current on/off status)',
+    '- Total pre-warm generations: ' + prewarmEvents.length,
+    '- Estimated cost of pre-warming: $' + prewarmCost.toFixed(2) + ' USD',
+    'By city:',
+    sortDesc(prewarmByCity).map(([c, n]) => '  - ' + c + ': ' + n).join('\n') || '  (none — job currently off, or nothing needed refreshing)',
     '',
     'ALL-TIME TOTALS',
     '- Total city/category combos ever generated: ' + (totalCacheRows ?? 'n/a'),
@@ -949,7 +1064,8 @@ async function buildUsageReport() {
   const attachments = [
     { filename: 'usage_events_' + todayStr() + '.csv', content: Buffer.from(toCSV(newUsageEvents, ['device_id', 'city', 'category', 'cache_status', 'input_tokens', 'output_tokens', 'cache_creation_input_tokens', 'cache_read_input_tokens', 'created_at'])).toString('base64') },
     { filename: 'favourites_' + todayStr() + '.csv', content: Buffer.from(toCSV(newFavourites, ['device_id', 'city', 'category', 'item_name', 'created_at'])).toString('base64') },
-    { filename: 'click_events_' + todayStr() + '.csv', content: Buffer.from(toCSV(newClicks, ['device_id', 'city', 'category', 'item_name', 'link_type', 'created_at'])).toString('base64') }
+    { filename: 'click_events_' + todayStr() + '.csv', content: Buffer.from(toCSV(newClicks, ['device_id', 'city', 'category', 'item_name', 'link_type', 'created_at'])).toString('base64') },
+    { filename: 'tab_opens_' + todayStr() + '.csv', content: Buffer.from(toCSV(newTabOpens, ['device_id', 'city', 'category', 'created_at'])).toString('base64') }
   ];
 
   return { text, attachments };
@@ -992,6 +1108,81 @@ cron.schedule('0 4 * * *', async () => {
     const combinedAttachments = [...usage.attachments, ...feedback.attachments];
     await sendResendEmail({ subject: 'Localé Daily Report — ' + todayStr(), text: combinedText, attachments: combinedAttachments });
   } catch (e) { console.error('Daily report failed:', e.message); }
+});
+
+// Pre-warm/refresh job for popular cities — built and tested 26 June, but
+// DELIBERATELY LEFT UNSCHEDULED. Current demand data is entirely test/debug
+// city noise from today's speed-debugging session (Wellington, Kobe,
+// Koblenz, Cape Town, Seattle, Toronto, Cairo, Muscat) — none of that
+// reflects real user interest, so running this on a schedule right now
+// would just spend real money keeping diagnostic test cities warm.
+//
+// Trigger manually via GET /admin/prewarm?key=ADMIN_SECRET to test the
+// mechanism end-to-end without it running unattended. Uncomment the
+// cron.schedule block below once real post-launch demand data exists.
+// Runs on GMT/UTC (Etc/UTC) when enabled — adjust the hour if GMT 3am
+// turns out not to be the quietest point for real traffic once you have it.
+//
+// Thresholds (tune as real data comes in): top 10 cities by demand, 14-day
+// trailing window, minimum 3 requests to qualify (filters out one-off
+// curiosity searches), refresh anything missing or older than 22 hours.
+
+async function getTopCities(limit, sinceDays, minRequests) {
+  const since = new Date(Date.now() - sinceDays * 24 * 60 * 60 * 1000).toISOString();
+  const rows = await supabaseSelect('usage_events', 'select=city,cache_status&created_at=gte.' + encodeURIComponent(since));
+  const counts = {};
+  rows.forEach(r => {
+    if (r.city && r.cache_status !== 'prewarm') counts[r.city] = (counts[r.city] || 0) + 1;
+  });
+  return Object.entries(counts)
+    .filter(([, count]) => count >= minRequests)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, limit)
+    .map(([city]) => city);
+}
+
+async function cacheAgeHours(cacheKey) {
+  const rows = await supabaseSelect('recommendations_cache', 'select=created_at&cache_key=eq.' + encodeURIComponent(cacheKey));
+  if (!rows[0]) return null;
+  return (Date.now() - new Date(rows[0].created_at).getTime()) / (60 * 60 * 1000);
+}
+
+async function prewarmTopCities() {
+  const topCities = await getTopCities(10, 14, 3);
+  const allCategories = [...Object.keys(PROMPTS), 'essentials_info'];
+  let refreshedCount = 0;
+  for (const city of topCities) {
+    for (const category of allCategories) {
+      const cacheKey = city.trim().toLowerCase() + '|' + category;
+      const age = await cacheAgeHours(cacheKey);
+      if (age === null || age > 22) {
+        try {
+          console.log('PREWARM', cacheKey, age === null ? '(missing)' : '(age ' + age.toFixed(1) + 'h)');
+          await generateRecommendation(city, category, { source: 'prewarm' });
+          refreshedCount++;
+        } catch (e) {
+          console.error('PREWARM failed', cacheKey, e.message);
+        }
+        await new Promise(r => setTimeout(r, 500)); // stagger — don't hammer the rate limit
+      }
+    }
+  }
+  console.log('PREWARM complete —', refreshedCount, 'combo(s) refreshed across', topCities.length, 'city/ies');
+}
+
+// cron.schedule('0 3 * * *', async () => {
+//   try { await prewarmTopCities(); } catch (e) { console.error('Prewarm job failed:', e.message); }
+// }, { timezone: 'Etc/UTC' });
+
+app.get('/admin/prewarm', async (req, res) => {
+  if (req.query.key !== process.env.ADMIN_SECRET) return res.status(403).json({ error: 'Forbidden' });
+  try {
+    await prewarmTopCities();
+    res.json({ status: 'prewarm complete' });
+  } catch (e) {
+    console.error('Prewarm failed:', e.message);
+    res.status(500).json({ error: 'Prewarm failed' });
+  }
 });
 
 app.get('/admin/daily-report', async (req, res) => {
