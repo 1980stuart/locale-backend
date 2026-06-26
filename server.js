@@ -511,10 +511,6 @@ app.post('/recommendations', async (req, res) => {
     const searchContext = await fetchSearchContext(city, category);
     const tAfterSearch = Date.now();
 
-    // Model tiering test (26 June) — essentials runs on Haiku 4.5 to compare
-    // speed/cost/quality against Sonnet; every other category is unaffected.
-    const model = category === 'essentials' ? 'claude-haiku-4-5-20251001' : 'claude-sonnet-4-6';
-
     const response = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
       headers: {
@@ -523,7 +519,7 @@ app.post('/recommendations', async (req, res) => {
         'anthropic-version': '2023-06-01'
       },
       body: JSON.stringify({
-        model: model,
+        model: 'claude-sonnet-4-6',
         max_tokens: 8000,
         system: [
           {
