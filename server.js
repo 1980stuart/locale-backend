@@ -518,8 +518,10 @@ app.post('/recommendations', async (req, res) => {
         'x-api-key': process.env.ANTHROPIC_KEY,
         'anthropic-version': '2023-06-01'
       },
+      const model = category === 'essentials' ? 'claude-haiku-4-5-20251001' : 'claude-sonnet-4-6';
+
       body: JSON.stringify({
-        model: 'claude-sonnet-4-6',
+        model: model,
         max_tokens: 8000,
         system: [
           {
