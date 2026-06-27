@@ -37,6 +37,28 @@ const VENUE_CHECK_CONFIG = {
   mustsee: { itemFilter: null },
 };
 
+// Per-category cache freshness — added 26 June. Replaces the old flat
+// 24-hour cutoff with a tunable number per category, all starting at 30
+// days deliberately, including 'events' (its date-relative content can go
+// wrong well within 30 days, but we're starting everything equal and
+// watching real behaviour before tuning any single category down).
+// Bumping any one number is a one-line change, nothing else needs to move.
+const CACHE_TTL_DAYS = {
+  essentials: 30,
+  essentials_info: 30,
+  neighbourhoods: 30,
+  coffee: 30,
+  food: 30,
+  eating: 30,
+  markets: 30,
+  art: 30,
+  walk: 30,
+  events: 30,
+  drink: 30,
+  night: 30,
+  mustsee: 30,
+};
+
 async function geocodeCity(city) {
   try {
     const url = 'https://maps.googleapis.com/maps/api/geocode/json?address=' +
@@ -590,8 +612,9 @@ app.post('/recommendations', async (req, res) => {
       const cached = await cacheCheck.json();
       if (Array.isArray(cached) && cached[0]) {
         const ageMs = Date.now() - new Date(cached[0].created_at).getTime();
-        const twentyFourHours = 24 * 60 * 60 * 1000;
-        if (ageMs < twentyFourHours) {
+        const ttlDays = CACHE_TTL_DAYS[category] || 30;
+        const ttlMs = ttlDays * 24 * 60 * 60 * 1000;
+        if (ageMs < ttlMs) {
           console.log('CACHE_HIT', cacheKey);
           logUsageEvent(device_id, city, category, 'hit');
           return res.json(cached[0].response_data);
