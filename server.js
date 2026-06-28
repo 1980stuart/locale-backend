@@ -128,34 +128,56 @@ function candidatesToPromptText(candidates) {
   return `\n\nREAL VENUES CONFIRMED TO CURRENTLY EXIST (from Google Places — use this as your candidate pool, do not invent venues outside this list, but you do not have to include all of them — apply your own local-knowledge judgement to pick which of these are genuinely worth recommending, not just which exist):\n${list}`;
 }
 
-async function verifyVenueExists(venueName, city) {
+async function verifyVenueExists(venueName, city, includeHours = false) {
   try {
+    const fieldMask = includeHours
+      ? 'places.displayName,places.regularOpeningHours'
+      : 'places.displayName';
     const r = await fetch('https://places.googleapis.com/v1/places:searchText', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         'X-Goog-Api-Key': process.env.GOOGLE_KEY,
-        'X-Goog-FieldMask': 'places.displayName'
+        'X-Goog-FieldMask': fieldMask
       },
       body: JSON.stringify({ textQuery: venueName + ' ' + city })
     });
     const d = await r.json();
-    return Array.isArray(d.places) && d.places.length > 0;
+    const place = Array.isArray(d.places) && d.places[0];
+    return {
+      exists: !!place,
+      hours: place ? formatTodayHours(place.regularOpeningHours) : null
+    };
   } catch (e) {
     console.error('Venue verification error:', e.message);
-    return true;
+    return { exists: true, hours: null }; // fail-open, same behaviour as before
   }
+}
+
+// Pulls today's real hours line from Places' weekdayDescriptions (e.g.
+// "Monday: 7:00 AM – 5:00 PM") — added 28 June so Coffee's "opens" field
+// reflects real Google data instead of Claude's guess, which is why it was
+// drifting from Maps: the old FieldMask never requested hours at all.
+function formatTodayHours(regularOpeningHours) {
+  if (!regularOpeningHours || !Array.isArray(regularOpeningHours.weekdayDescriptions)) return null;
+  const todayIndex = (new Date().getDay() + 6) % 7; // Places: Mon=0..Sun=6. JS getDay(): Sun=0.
+  return regularOpeningHours.weekdayDescriptions[todayIndex] || null;
 }
 
 async function verifyItemsExist(items, city, category) {
   const config = VENUE_CHECK_CONFIG[category];
   if (!config || !Array.isArray(items)) return items;
+  const wantsHours = category === 'coffee';
   const checked = await Promise.all(items.map(async (item) => {
     if (config.itemFilter && !config.itemFilter(item)) return item;
     if (!item.name) return item;
-    const exists = await verifyVenueExists(item.name, city);
-    if (!exists) console.log('VENUE_REJECTED', category, item.name, city);
-    return exists ? item : null;
+    const { exists, hours } = await verifyVenueExists(item.name, city, wantsHours);
+    if (!exists) {
+      console.log('VENUE_REJECTED', category, item.name, city);
+      return null;
+    }
+    if (wantsHours && hours) item.opens = hours; // real Places data overrides Claude's guess
+    return item;
   }));
   return checked.filter(Boolean);
 }
@@ -241,10 +263,11 @@ STRICT RULES FOR THIS TAB:
 - Always include state or region specific transport pricing where it exists (e.g. Queensland 50c flat fare, London Oyster cap)
 - If the web search context below includes what looks like an official government or public-transport-authority source (a .gov domain, or the city's actual transit authority website), treat that as the authoritative source for fares, payment methods and ticketing specifically — prioritise it over travel blogs, tourism sites, or your own training knowledge, since fare structures and payment systems change on government timelines, not yours
 - For weather: describe typical seasonal patterns only — do not exaggerate flood, cyclone or disaster risk for areas where this is uncommon. Be accurate not alarmist.
+- If this city or region has a well-known, distinctly named local weather phenomenon (e.g. Trieste's Bora wind, Chicago's lake-effect winds, the Santa Ana winds, a region's monsoon or harmattan season) — name it explicitly and explain what travellers should actually expect from it. Only mention one if it genuinely exists and is well known; never invent one to fill space.
 
 Cover: CURRENCY (local currency, how locals pay, where to get cash, tipping culture, money-saving local tips and structural hacks — fare savers, discount cards, payment shortcuts only locals know about, money scams to avoid), WEATHER (current season implications, what to pack specifically, best and worst months with reasons, any unique weather patterns), GETTING AROUND (how locals actually travel day to day, which apps to download, transit cards, airport to city like a local, transport scams to avoid, TWO OR THREE separate tips only locals know — favour structural ones like fare-saving schemes, discount cards, or payment shortcuts, not just one). Favour durable structural knowledge — fare schemes, discount cards, payment hacks — over specific prices, which go stale quickly and are hard to verify. Every time must be specific.
 
-Return JSON: {"cityTag":"one line poetic character description of ${city}","weather":{"condition":"sunny|cloudy|rainy|stormy|windy|snowy|humid|dry|mild","summary":"one line on typical seasonal conditions, e.g. warm and humid with afternoon storms common"},"currency":{"code":"","symbol":"","rate":""},"items":[{"name":"","type":"currency|weather|transport","description":""}]}`,
+Return JSON: {"items":[{"name":"","type":"currency|weather|transport","description":""}]}`,
 
   neighbourhoods: (city) => `You are Localé's Neighbourhoods Agent for ${city}. Help travellers understand where to actually base themselves.
 
@@ -463,9 +486,9 @@ async function generateRecommendation(city, category, { deviceId = null, source 
       },
       body: JSON.stringify({
         model: 'claude-sonnet-4-6',
-        max_tokens: 500,
+        max_tokens: 800,
         system: 'Return only valid JSON. No markdown, no backticks, no explanation.',
-        messages: [{ role: 'user', content: `For ${city} return JSON with: {"cityTag":"one evocative line capturing this city soul","funFact":"one genuinely surprising or delightful true fact about this city that most visitors do not know","weather":{"condition":"sunny|cloudy|rainy|stormy|windy|snowy|humid|dry|mild","summary":"one line on typical seasonal conditions"},"currency":{"code":"e.g. EUR","symbol":"e.g. €","rate":"e.g. 1 USD = 0.92 EUR"}}` }]
+        messages: [{ role: 'user', content: `For ${city} return JSON with: {"cityTag":"one evocative line capturing this city soul","funFacts":["up to three genuinely surprising or delightful true facts about this city that most visitors do not know, each on a distinct theme — return fewer than three if a city doesn't genuinely support three equally strong, non-redundant facts; never pad with a weaker one just to hit the count"],"currency":{"code":"e.g. EUR","symbol":"e.g. €"}}` }]
       })
     });
     const d = await r.json();
@@ -1258,7 +1281,7 @@ app.get('/admin/essentials-audit', async (req, res) => {
       if (!parsed) return city + ' [' + category + '] — no data';
 
       const transportItems = (parsed.items || []).filter(i => i.type === 'transport').map(i => '  - ' + i.name + ': ' + i.description);
-      const currency = parsed.currency ? (parsed.currency.code + ' ' + parsed.currency.symbol + ' (' + parsed.currency.rate + ')') : 'n/a';
+      const currency = parsed.currency ? (parsed.currency.code + ' ' + parsed.currency.symbol) : 'n/a';
       const ageHours = Math.round((Date.now() - new Date(row.created_at).getTime()) / (60 * 60 * 1000));
 
       return [
