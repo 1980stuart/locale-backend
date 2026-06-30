@@ -562,13 +562,13 @@ async function generateRecommendation(city, category, { deviceId = null, source 
 // ===========================================================================
 
 const TOUR_THEMES = {
-  walking: 'Walking Tours',
-  bike: 'Bike Tours',
-  cooking: 'Cooking Classes',
-  arthistory: 'Art & History Tours',
-  food: 'Food Tours',
-  daytrips: 'Day Trips & Excursions',
-  workshops: 'Cultural Workshops',
+  walking: { label: 'Walking Tours', tagId: 12046 },
+  bike: { label: 'Bike Tours', tagId: 21702 },
+  cooking: { label: 'Cooking Classes', tagId: 12034 },
+  arthistory: { label: 'Art & History Tours', tagId: 12029 },
+  food: { label: 'Food Tours', tagId: 21567 },
+  daytrips: { label: 'Day Trips & Excursions', tagId: 11889 },
+  workshops: { label: 'Cultural Workshops', tagId: 21479 },
 };
 
 async function resolveViatorDestinationId(city) {
