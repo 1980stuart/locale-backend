@@ -786,6 +786,28 @@ app.get('/admin/viator-test', async (req, res) => {
   }
 });
 
+// One-off debug route to pull Viator's real tag taxonomy — needed to find
+// the correct numeric tag IDs for our 7 themes (TOUR_THEMES currently uses
+// plain-text labels that don't match Viator's actual tag system, which is
+// why product search was returning empty results). Not linked from the
+// app; delete or leave dormant once the real IDs are hardcoded.
+app.get('/admin/viator-tags', async (req, res) => {
+  if (req.query.key !== process.env.ADMIN_SECRET) return res.status(403).json({ error: 'Forbidden' });
+  try {
+    const r = await fetch('https://api.viator.com/partner/products/tags', {
+      headers: {
+        'exp-api-key': VIATOR_API_KEY,
+        'Accept': 'application/json;version=2.0',
+        'Accept-Language': 'en-US'
+      }
+    });
+    const d = await r.json();
+    res.json(d);
+  } catch (e) {
+    console.error('Viator tags fetch error:', e.message);
+    res.status(500).json({ error: 'Failed to fetch Viator tags' });
+  }
+});
 app.post('/claude', async (req, res) => {
   try {
     const response = await fetch('https://api.anthropic.com/v1/messages', {
