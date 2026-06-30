@@ -619,7 +619,7 @@ async function fetchViatorProducts(destinationId, theme) {
         'Content-Type': 'application/json'
       },
       body: JSON.stringify({
-        filtering: { destination: destinationId, tags: [TOUR_THEMES[theme]] },
+        filtering: { destination: destinationId, tags: [TOUR_THEMES[theme].tagId] },
         sorting: { sort: 'TRAVELER_RATING' },
         pagination: { start: 1, count: 20 }
       })
