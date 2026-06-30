@@ -8,6 +8,13 @@ app.use(express.json());
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_KEY = process.env.SUPABASE_KEY;
 const VIATOR_API_KEY = process.env.VIATOR_API_KEY;
+// Dashboard key — deliberately separate from ADMIN_SECRET. ADMIN_SECRET
+// unlocks destructive/sensitive admin routes (prewarm trigger, raw CSV
+// exports); the dashboard is meant to be shareable with external partners,
+// so it gets its own simpler key. Falls back to ADMIN_SECRET only if
+// DASHBOARD_KEY isn't set on Railway, so nothing breaks if it's forgotten —
+// but set DASHBOARD_KEY explicitly before sharing this with anyone external.
+const DASHBOARD_KEY = process.env.DASHBOARD_KEY || process.env.ADMIN_SECRET;
 
 function supabaseHeaders() {
   return {
@@ -38,13 +45,6 @@ const VENUE_CHECK_CONFIG = {
   mustsee: { itemFilter: null },
 };
 
-// Per-category cache freshness — added 26 June. Replaces the old flat
-// 24-hour cutoff with a tunable number per category, all starting at 30
-// days deliberately, including 'events' (its date-relative content can go
-// wrong well within 30 days, but we're starting everything equal and
-// watching real behaviour before tuning any single category down).
-// Bumping any one number is a one-line change, nothing else needs to move.
-// 'tours' added per the Find an Experience build — same 30-day default.
 const CACHE_TTL_DAYS = {
   essentials: 30,
   essentials_info: 30,
@@ -153,17 +153,13 @@ async function verifyVenueExists(venueName, city, includeHours = false) {
     };
   } catch (e) {
     console.error('Venue verification error:', e.message);
-    return { exists: true, hours: null }; // fail-open, same behaviour as before
+    return { exists: true, hours: null };
   }
 }
 
-// Pulls today's real hours line from Places' weekdayDescriptions (e.g.
-// "Monday: 7:00 AM – 5:00 PM") — added 28 June so Coffee's "opens" field
-// reflects real Google data instead of Claude's guess, which is why it was
-// drifting from Maps: the old FieldMask never requested hours at all.
 function formatTodayHours(regularOpeningHours) {
   if (!regularOpeningHours || !Array.isArray(regularOpeningHours.weekdayDescriptions)) return null;
-  const todayIndex = (new Date().getDay() + 6) % 7; // Places: Mon=0..Sun=6. JS getDay(): Sun=0.
+  const todayIndex = (new Date().getDay() + 6) % 7;
   return regularOpeningHours.weekdayDescriptions[todayIndex] || null;
 }
 
@@ -179,7 +175,7 @@ async function verifyItemsExist(items, city, category) {
       console.log('VENUE_REJECTED', category, item.name, city);
       return null;
     }
-    if (wantsHours && hours) item.opens = hours; // real Places data overrides Claude's guess
+    if (wantsHours && hours) item.opens = hours;
     return item;
   }));
   return checked.filter(Boolean);
@@ -465,15 +461,6 @@ function extractJSONServer(text) {
   return JSON.parse(cleaned);
 }
 
-// Core generation logic, extracted 26 June so both the live /recommendations
-// route AND the background pre-warm job can share exactly one implementation
-// instead of two copies drifting apart. Always generates fresh and saves to
-// cache — never checks whether a cache entry already exists; that decision
-// stays with whoever calls this (the route checks freshness before calling
-// at all; the pre-warm job checks age via cacheAgeHours() before calling).
-// `source` is purely a logging/attribution tag — 'miss' for real user-driven
-// generations, 'prewarm' for background-job-driven ones — so the daily
-// report can tell real demand apart from background activity.
 async function generateRecommendation(city, category, { deviceId = null, source = 'miss' } = {}) {
   const cacheKey = city.trim().toLowerCase() + '|' + category;
   const t0 = Date.now();
@@ -525,20 +512,9 @@ async function generateRecommendation(city, category, { deviceId = null, source 
       model: 'claude-sonnet-4-6',
       max_tokens: 8000,
       system: [
+        { type: 'text', text: MASTER_SYSTEM },
         {
           type: 'text',
-          text: MASTER_SYSTEM
-        },
-        {
-          type: 'text',
-          // Cache breakpoint moved here (26 June) — this is the LAST system
-          // block whose content is identical across every single call, so
-          // per Anthropic's caching rules the breakpoint belongs here, not
-          // on MASTER_SYSTEM alone, to cover both static blocks as one
-          // cached unit. MASTER_SYSTEM was also expanded the same day with
-          // the scaling/worked-examples/failure-patterns sections specifically
-          // so the combined static prefix clears Sonnet 4.6's 1,024-token
-          // minimum cacheable length with real margin.
           text: 'Return only valid JSON. No markdown, no backticks, no explanation. Do not add any text, notes, or commentary before or after the JSON object — including notes about items you excluded or chose not to include. If you have low confidence in finding genuine results for this city/category, or can only confidently verify a small number of items, include a "note" field at the top level of the JSON object (alongside "items") explaining this briefly and honestly to the traveller — for example: {"note":"Only one coffee shop could be confidently verified as currently open in this town — fewer options exist here than in larger cities.","items":[...]}. Never write this explanation as plain text outside the JSON object.',
           cache_control: { type: 'ephemeral' }
         }
@@ -582,21 +558,7 @@ async function generateRecommendation(city, category, { deviceId = null, source 
 }
 
 // ===========================================================================
-// FIND AN EXPERIENCE — Viator-curated tours/activities, added per the agreed
-// build plan. Primary source: Viator Affiliate API (search model). Falls
-// back to Claude-direct generation when Viator coverage is thin/absent for
-// a given city+theme. Every result tagged `source: 'affiliate'|'direct'`
-// from day one for clean reporting and future expansion. No exact pricing
-// shown — Budget/Mid-range/Premium tier derived from real price at
-// generation time instead, sidestepping 30-day cache staleness.
-//
-// KNOWN UNVERIFIED RISK: Viator's destination-search and /products/search
-// endpoint paths, field names, and response shape below are written from
-// documented patterns, NOT verified against a live response with your
-// actual key. Treat the first real /tours call as a debugging step — check
-// Railway logs for the raw response shape before trusting this in
-// production. Worth testing via /admin/viator-test below before relying on
-// the full curation flow.
+// FIND AN EXPERIENCE — Viator-curated tours/activities. See manual §3a.
 // ===========================================================================
 
 const TOUR_THEMES = {
@@ -609,11 +571,6 @@ const TOUR_THEMES = {
   workshops: 'Cultural Workshops',
 };
 
-// Resolves a city name to Viator's internal destination ID, caching the
-// result in the same recommendations_cache table (under a distinct
-// 'viator_dest|' prefix so it never collides with real recommendation
-// cache keys) since this mapping is stable and shouldn't be re-fetched
-// per search.
 async function resolveViatorDestinationId(city) {
   const cacheKey = 'viator_dest|' + city.trim().toLowerCase();
   try {
@@ -625,9 +582,7 @@ async function resolveViatorDestinationId(city) {
     if (Array.isArray(data) && data[0] && data[0].response_data && data[0].response_data.destinationId) {
       return data[0].response_data.destinationId;
     }
-  } catch (e) {
-    // cache check failed, fall through to a live lookup
-  }
+  } catch (e) {}
 
   try {
     const r = await fetch('https://api.viator.com/partner/destinations', {
@@ -653,11 +608,6 @@ async function resolveViatorDestinationId(city) {
   }
 }
 
-// Calls Viator's /products/search (search model) filtered by destination
-// and theme tag. Sorted by traveler rating, deliberately NOT Viator's
-// default 'featured' sort — featured placement can be influenced by what
-// operators pay Viator, which runs against the "never paid placement"
-// trust positioning the rest of the app is built on.
 async function fetchViatorProducts(destinationId, theme) {
   try {
     const r = await fetch('https://api.viator.com/partner/products/search', {
@@ -686,9 +636,6 @@ async function fetchViatorProducts(destinationId, theme) {
   }
 }
 
-// Direct-generation fallback prompt — same "doubt means leave it out"
-// principle as the rest of the app, applied to providers instead of venues.
-// Used only when Viator returns thin/no coverage for a city+theme.
 const TOUR_DIRECT_PROMPT = (city, themeLabel) => `You are Localé's Experience Agent for ${city}. Suggest genuine, locally-rooted ${themeLabel.toLowerCase()} a traveller could book. THE BOURDAIN TEST APPLIES — favour small, independent, locally-run operators over mass-market tour companies.
 
 STRICT RULES:
@@ -746,9 +693,6 @@ async function generateTourRecommendation(city, theme) {
         return {
           ...item,
           source: 'affiliate',
-          // NOTE: confirm the actual affiliate-tagged URL field name against
-          // a live Viator response before trusting this in production —
-          // productUrl is the documented pattern, not yet verified live.
           bookingUrl: match ? (match.productUrl || null) : null,
         };
       });
@@ -759,12 +703,9 @@ async function generateTourRecommendation(city, theme) {
       return result;
     } catch (e) {
       console.error('Tour curation (affiliate path) error:', e.message);
-      // fall through to direct generation below
     }
   }
 
-  // Fallback — thin/no Viator coverage for this city+theme, or the
-  // affiliate-path curation call itself failed.
   try {
     const r = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
@@ -817,9 +758,7 @@ app.post('/tours', async (req, res) => {
           return res.json(cached[0].response_data);
         }
       }
-    } catch (e) {
-      // cache check failed, continue to generate fresh
-    }
+    } catch (e) {}
 
     console.log('CACHE_MISS', cacheKey);
     const data = await generateTourRecommendation(city, theme);
@@ -829,10 +768,6 @@ app.post('/tours', async (req, res) => {
   }
 });
 
-// Debugging aid — added alongside the Find an Experience build. Lets you
-// hit Viator's product search directly via the browser/Postman to confirm
-// the real response shape before trusting the curation flow above. Not
-// linked from the app itself.
 app.get('/admin/viator-test', async (req, res) => {
   if (req.query.key !== process.env.ADMIN_SECRET) return res.status(403).json({ error: 'Forbidden' });
   const city = req.query.city;
@@ -916,9 +851,7 @@ app.post('/recommendations', async (req, res) => {
           return res.json(cached[0].response_data);
         }
       }
-    } catch (e) {
-      // cache check failed, continue to generate fresh
-    }
+    } catch (e) {}
 
     console.log('CACHE_MISS', cacheKey);
     const data = await generateRecommendation(city, category, { deviceId: device_id, source: 'miss' });
@@ -1020,9 +953,6 @@ app.post('/feedback', async (req, res) => {
   }
 });
 
-// Outbound click tracking — added 25 June for monetisation visibility.
-// Fire-and-forget from the app's side; this endpoint itself responds fast
-// and never blocks the user's actual link from opening.
 app.post('/clicks', async (req, res) => {
   try {
     const { device_id, city, category, item_name, link_type } = req.body;
@@ -1041,15 +971,10 @@ app.post('/clicks', async (req, res) => {
     res.json({ status: 'logged' });
   } catch(e) {
     console.error('click_events insert network error:', e.message);
-    res.json({ status: 'logged' }); // never surface a tracking failure to the app itself
+    res.json({ status: 'logged' });
   }
 });
 
-// Tab-open tracking — added 26 June. Captures which tabs people actually
-// open (regardless of whether the content was preloaded or fetched fresh),
-// since that's the data needed to make an informed lazy-load decision later
-// — the existing usage_events log only shows what got GENERATED, not what
-// anyone actually looked at. Same fire-and-forget pattern as /clicks.
 app.post('/tab-opens', async (req, res) => {
   try {
     const { device_id, city, category } = req.body;
@@ -1088,8 +1013,12 @@ async function pingSupabase() {
 setInterval(pingSupabase, 3 * 24 * 60 * 60 * 1000);
 pingSupabase();
 
+function daysAgo(n) {
+  return new Date(Date.now() - n * 24 * 60 * 60 * 1000).toISOString();
+}
+
 function hours24Ago() {
-  return new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+  return daysAgo(1);
 }
 
 function todayStr() {
@@ -1115,10 +1044,6 @@ async function supabaseSelect(table, queryParams) {
       headers: supabaseHeaders()
     });
     const data = await r.json();
-    // Same silent-failure class as the original usage_events insert bug:
-    // a rejected/errored Supabase response is still valid JSON, just not an
-    // array — without this check, that error object gets quietly discarded
-    // and every caller sees "no rows" instead of "something went wrong."
     if (!Array.isArray(data)) {
       console.error('Supabase select REJECTED (' + table + '):', r.status, JSON.stringify(data));
       return [];
@@ -1157,10 +1082,6 @@ async function supabaseCount(table) {
   }
 }
 
-// Approximate Claude Sonnet pricing, USD per million tokens.
-// CONFIRM against https://platform.claude.com/docs/en/about-claude/pricing before treating this as exact —
-// pricing can change, and this estimate does NOT account for the prompt-caching discount on cache_read_input_tokens
-// (cached reads are billed at a fraction of the base input rate), so true cost is likely somewhat LOWER than this estimate.
 const PRICE_PER_MTOK_INPUT = 3.00;
 const PRICE_PER_MTOK_OUTPUT = 15.00;
 
@@ -1189,11 +1110,6 @@ function logUsageEvent(deviceId, city, category, cacheStatus, usage) {
     body: JSON.stringify(body)
   })
     .then(async (r) => {
-      // fetch() only rejects on network failures — it does NOT reject on
-      // HTTP error responses (400/403/etc). Without this check, a rejected
-      // insert (e.g. an RLS policy blocking it) resolves "successfully" and
-      // silently vanishes — no exception, nothing in the .catch() below, no
-      // log line anywhere. This is what was actually happening on 24 June.
       if (!r.ok) {
         const errText = await r.text();
         console.error('usage_events insert REJECTED:', r.status, errText);
@@ -1231,8 +1147,38 @@ async function sendResendEmail({ subject, text, attachments }) {
   }
 }
 
-async function buildUsageReport() {
-  const since = hours24Ago();
+// DAU/MAU/stickiness — added per Stuart's request. Deliberately independent
+// of whatever window the surrounding report itself uses (a weekly report
+// still wants to know "yesterday's DAU" and "trailing-30-day MAU", not
+// "this week's" version of either).
+//
+// HONEST CAVEAT, also surfaced directly in the report text: this measures
+// DISTINCT DEVICES active in each window, not whether the SAME device
+// returns across multiple days — true returning-user tracking (12 distinct
+// devices this month could mean 12 different people once each, or the same
+// 4 people returning 3x each) needs a separate first-seen-date table, not
+// yet built (see manual to-do list). DAU/MAU as computed here is still a
+// real, standard, useful metric on its own — just not the full retention
+// picture by itself.
+async function computeDauMauStickiness() {
+  const dauSince = daysAgo(1);
+  const mauSince = daysAgo(30);
+
+  const dauRows = await supabaseSelect('usage_events', 'select=device_id,cache_status&created_at=gte.' + encodeURIComponent(dauSince));
+  const mauRows = await supabaseSelect('usage_events', 'select=device_id,cache_status&created_at=gte.' + encodeURIComponent(mauSince));
+
+  const dauDevices = new Set(dauRows.filter(r => r.cache_status !== 'prewarm' && r.device_id).map(r => r.device_id));
+  const mauDevices = new Set(mauRows.filter(r => r.cache_status !== 'prewarm' && r.device_id).map(r => r.device_id));
+
+  const dau = dauDevices.size;
+  const mau = mauDevices.size;
+  const stickiness = mau > 0 ? (dau / mau) * 100 : null;
+
+  return { dau, mau, stickiness };
+}
+
+async function buildUsageReport(windowDays = 1, windowLabel = 'last 24 hours') {
+  const since = daysAgo(windowDays);
 
   const newUsageEvents = await supabaseSelect('usage_events', 'select=*&created_at=gte.' + encodeURIComponent(since));
   const newFavourites = await supabaseSelect('favourites', 'select=*&created_at=gte.' + encodeURIComponent(since));
@@ -1243,11 +1189,6 @@ async function buildUsageReport() {
   const totalFavourites = await supabaseCount('favourites');
   const totalClicks = await supabaseCount('click_events');
 
-  // Split real user-driven events from background pre-warm activity (added
-  // 26 June) BEFORE computing any "demand" stats — otherwise the pre-warm
-  // job's own background generations would quietly inflate city/category
-  // demand figures and make them look more popular than real users ever
-  // made them, defeating the entire point of keeping these signals separate.
   const realUsageEvents = newUsageEvents.filter(e => e.cache_status !== 'prewarm');
   const prewarmEvents = newUsageEvents.filter(e => e.cache_status === 'prewarm');
 
@@ -1274,23 +1215,12 @@ async function buildUsageReport() {
     favCategoryCounts[f.category] = (favCategoryCounts[f.category] || 0) + 1;
   });
 
-  // Outbound click tracking — added 25 June, the key monetisation-readiness signal.
   const clicksByCategory = {}, clicksByType = {};
   newClicks.forEach(c => {
     if (c.category) clicksByCategory[c.category] = (clicksByCategory[c.category] || 0) + 1;
     if (c.link_type) clicksByType[c.link_type] = (clicksByType[c.link_type] || 0) + 1;
   });
 
-  // Find an Experience reporting — added per the agreed build plan.
-  // Theme demand combines tour-related outbound clicks (link_type holds the
-  // theme key, since the frontend's logClick call passes theme as linkType
-  // for this category) with first-time generations (new cache rows whose
-  // key contains '|tours|') so the figure reflects both "people clicked
-  // book" and "people searched this combo for the first time" — the future
-  // sales-pitch data point ("200 people searched cooking classes in
-  // Lisbon"). Source split (affiliate vs direct) requires reading each new
-  // tours cache row's actual response_data, since source is stored inside
-  // the cached JSON payload, not in click_events/usage_events themselves.
   const tourClicks = newClicks.filter(c => c.category === 'tours');
   const tourThemeDemand = {};
   tourClicks.forEach(c => {
@@ -1302,12 +1232,6 @@ async function buildUsageReport() {
     if (theme) tourThemeDemand[theme] = (tourThemeDemand[theme] || 0) + 1;
   });
 
-  // Tab engagement — added 26 June. The key signal for any future lazy-load
-  // decision: what fraction of real searches actually opened each tab,
-  // versus the 100%-by-design preload-everything figure categoryDemand
-  // would otherwise show. searchesCount approximates total searches via
-  // essentials_info, which fires exactly once per real (non-prewarm) search
-  // regardless of how many tabs anyone goes on to open.
   const searchesCount = realUsageEvents.filter(e => e.category === 'essentials_info').length;
   const tabOpensByCategory = {};
   newTabOpens.forEach(o => {
@@ -1320,10 +1244,6 @@ async function buildUsageReport() {
     return '  - ' + cat + ': ' + opens + ' open(s) (' + rate + ' of searches)';
   }).join('\n');
 
-  // Real token/cost totals from the last 24h, based on actual Anthropic usage figures logged per call.
-  // Deliberately includes EVERYTHING (real + prewarm) so this remains the true total cost figure that
-  // should match Anthropic's actual bill — the PRE-WARM ACTIVITY section below breaks out how much of
-  // this total came from background activity specifically, so nothing here is hidden, just itemised.
   let totalInputTokens = 0, totalOutputTokens = 0, totalCacheCreationTokens = 0, totalCacheReadTokens = 0;
   newUsageEvents.forEach(e => {
     totalInputTokens += e.input_tokens || 0;
@@ -1345,53 +1265,60 @@ async function buildUsageReport() {
 
   const sortDesc = obj => Object.entries(obj).sort((a, b) => b[1] - a[1]);
 
+  const dauMauStats = await computeDauMauStickiness();
+
   const text = [
-    'Localé — Daily Usage Report — ' + todayStr(),
+    'Localé — Usage Report — ' + windowLabel + ' — generated ' + todayStr(),
     '',
-    'LAST 24 HOURS (real user activity only — excludes background pre-warm)',
+    'SUMMARY (' + windowLabel + ' — real user activity only, excludes background pre-warm)',
     '- Total app requests logged: ' + realUsageEvents.length + ' (' + hits + ' cache hits, ' + misses + ' new generations)',
     '- Distinct devices seen: ' + distinctDevices.size,
     '- New favourites saved: ' + newFavourites.length,
     '',
-    'CLAUDE API COST (last 24h — TOTAL real figures from Anthropic, includes pre-warm; see PRE-WARM ACTIVITY below for the split)',
+    'DAU / MAU / STICKINESS (independent of this report\'s own ' + windowLabel + ' window — DAU is always yesterday, MAU is always trailing 30 days)',
+    '- DAU (distinct devices, last 24h): ' + dauMauStats.dau,
+    '- MAU (distinct devices, last 30 days): ' + dauMauStats.mau,
+    '- Stickiness (DAU/MAU): ' + (dauMauStats.stickiness !== null ? dauMauStats.stickiness.toFixed(1) + '%' : 'n/a (no MAU yet)') + ' — healthy consumer-app benchmark is roughly 20%; this counts distinct devices per window, not confirmed returning users (see manual — true retention tracking not yet built)',
+    '',
+    'CLAUDE API COST (' + windowLabel + ' — TOTAL real figures from Anthropic, includes pre-warm; see PRE-WARM ACTIVITY below for the split)',
     '- Input tokens: ' + totalInputTokens.toLocaleString(),
     '- Output tokens: ' + totalOutputTokens.toLocaleString(),
     '- Cache creation tokens: ' + totalCacheCreationTokens.toLocaleString() + ' (written to prompt cache)',
     '- Cache read tokens: ' + totalCacheReadTokens.toLocaleString() + ' (served from prompt cache, billed at a discount not reflected below)',
     '- Estimated cost: $' + estimatedCost.toFixed(2) + ' USD (base input/output rates only — actual cost is likely somewhat lower due to the cache-read discount; verify current per-token pricing before treating this as exact)',
-    '- Estimated cost per active device: ' + (costPerDevice !== null ? '$' + costPerDevice.toFixed(4) : 'n/a (no devices seen)') + ' — worth watching the trend over weeks, not any single day\'s number',
+    '- Estimated cost per active device: ' + (costPerDevice !== null ? '$' + costPerDevice.toFixed(4) : 'n/a (no devices seen)') + ' — worth watching the trend over weeks, not any single window\'s number',
     '',
-    'OUTBOUND CLICKS (last 24h — the key monetisation-readiness signal)',
+    'OUTBOUND CLICKS (' + windowLabel + ' — the key monetisation-readiness signal)',
     '- Total outbound clicks: ' + newClicks.length + ' (all-time: ' + (totalClicks ?? 'n/a') + ')',
     'By category:',
     sortDesc(clicksByCategory).map(([c, n]) => '  - ' + c + ': ' + n).join('\n') || '  (none yet)',
     'By link type:',
     sortDesc(clicksByType).map(([c, n]) => '  - ' + c + ': ' + n).join('\n') || '  (none yet)',
     '',
-    'FIND AN EXPERIENCE — THEME DEMAND (last 24h, first-time generations + outbound clicks combined)',
+    'FIND AN EXPERIENCE — THEME DEMAND (' + windowLabel + ', first-time generations + outbound clicks combined)',
     '- Total tour-related outbound clicks: ' + tourClicks.length,
     sortDesc(tourThemeDemand).map(([t, n]) => '- ' + t + ': ' + n).join('\n') || '(none yet)',
     '',
-    'TAB ENGAGEMENT (last 24h — % of real searches that opened each tab; the key signal for any future lazy-load decision)',
+    'TAB ENGAGEMENT (' + windowLabel + ' — % of real searches that opened each tab; the key signal for any future lazy-load decision)',
     '- Total searches (approx, via essentials_info): ' + searchesCount,
     tabEngagementLines || '  (no data yet)',
     '',
-    'TOP CITIES BY TOTAL DEMAND (last 24h — real user activity only, every request hit or miss)',
+    'TOP CITIES BY TOTAL DEMAND (' + windowLabel + ' — real user activity only, every request hit or miss)',
     sortDesc(cityDemand).map(([c, n]) => '- ' + c + ': ' + n).join('\n') || '(none yet)',
     '',
-    'TOP CATEGORIES BY TOTAL DEMAND (last 24h — real user activity only, every request hit or miss)',
+    'TOP CATEGORIES BY TOTAL DEMAND (' + windowLabel + ' — real user activity only, every request hit or miss)',
     sortDesc(categoryDemand).map(([c, n]) => '- ' + c + ': ' + n).join('\n') || '(none yet)',
     '',
-    'NEW GENERATIONS BY CITY (last 24h — cost signal only, first-time searches, includes pre-warm)',
+    'NEW GENERATIONS BY CITY (' + windowLabel + ' — cost signal only, first-time searches, includes pre-warm)',
     sortDesc(cityNewGen).map(([c, n]) => '- ' + c + ': ' + n).join('\n') || '(none)',
     '',
-    'NEW GENERATIONS BY CATEGORY (last 24h — cost signal only, first-time searches, includes pre-warm)',
+    'NEW GENERATIONS BY CATEGORY (' + windowLabel + ' — cost signal only, first-time searches, includes pre-warm)',
     sortDesc(categoryNewGen).map(([c, n]) => '- ' + c + ': ' + n).join('\n') || '(none)',
     '',
-    'TOP CATEGORIES FAVOURITED (last 24h)',
+    'TOP CATEGORIES FAVOURITED (' + windowLabel + ')',
     sortDesc(favCategoryCounts).map(([c, n]) => '- ' + c + ': ' + n).join('\n') || '(none)',
     '',
-    'PRE-WARM ACTIVITY (last 24h — background refresh job; NOT real user demand, see manual for current on/off status)',
+    'PRE-WARM ACTIVITY (' + windowLabel + ' — background refresh job; NOT real user demand, see manual for current on/off status)',
     '- Total pre-warm generations: ' + prewarmEvents.length,
     '- Estimated cost of pre-warming: $' + prewarmCost.toFixed(2) + ' USD',
     'By city:',
@@ -1415,8 +1342,8 @@ async function buildUsageReport() {
   return { text, attachments };
 }
 
-async function buildFeedbackReport() {
-  const since = hours24Ago();
+async function buildFeedbackReport(windowDays = 1, windowLabel = 'last 24 hours') {
+  const since = daysAgo(windowDays);
 
   const newFeedback = await supabaseSelect('feedback', 'select=*&created_at=gte.' + encodeURIComponent(since));
   const totalFeedback = await supabaseCount('feedback');
@@ -1426,9 +1353,9 @@ async function buildFeedbackReport() {
   ).join('\n\n') || '(none)';
 
   const text = [
-    'Localé — Daily Feedback — ' + todayStr(),
+    'Localé — Feedback — ' + windowLabel + ' — generated ' + todayStr(),
     '',
-    'NEW FEEDBACK (last 24h): ' + newFeedback.length,
+    'NEW FEEDBACK (' + windowLabel + '): ' + newFeedback.length,
     '',
     feedbackLines,
     '',
@@ -1444,40 +1371,39 @@ async function buildFeedbackReport() {
   return { text, attachments };
 }
 
-cron.schedule('0 4 * * *', async () => {
+// Daily report — PAUSED per Stuart's request (switched to weekly-only to
+// cut inbox noise). Route /admin/daily-report is deliberately left intact
+// below so it can still be checked manually if something needs fast
+// debugging mid-week, without waiting for Monday's weekly run — same
+// pattern as the pre-warm job's cron staying paused while its manual
+// trigger route stays live. Uncomment this block to restore the automatic
+// daily email.
+// cron.schedule('0 4 * * *', async () => {
+//   try {
+//     const usage = await buildUsageReport(1, 'last 24 hours');
+//     const feedback = await buildFeedbackReport(1, 'last 24 hours');
+//     const combinedText = usage.text + '\n\n' + '='.repeat(40) + '\n\n' + feedback.text;
+//     const combinedAttachments = [...usage.attachments, ...feedback.attachments];
+//     await sendResendEmail({ subject: 'Localé Daily Report — ' + todayStr(), text: combinedText, attachments: combinedAttachments });
+//   } catch (e) { console.error('Daily report failed:', e.message); }
+// });
+
+// Weekly internal report — same content/structure as the daily report, just
+// a 7-day window. Runs Monday 5am UTC.
+cron.schedule('0 5 * * 1', async () => {
   try {
-    const usage = await buildUsageReport();
-    const feedback = await buildFeedbackReport();
+    const usage = await buildUsageReport(7, 'last 7 days');
+    const feedback = await buildFeedbackReport(7, 'last 7 days');
     const combinedText = usage.text + '\n\n' + '='.repeat(40) + '\n\n' + feedback.text;
     const combinedAttachments = [...usage.attachments, ...feedback.attachments];
-    await sendResendEmail({ subject: 'Localé Daily Report — ' + todayStr(), text: combinedText, attachments: combinedAttachments });
-  } catch (e) { console.error('Daily report failed:', e.message); }
+    await sendResendEmail({ subject: 'Localé Weekly Report — ' + todayStr(), text: combinedText, attachments: combinedAttachments });
+  } catch (e) { console.error('Weekly report failed:', e.message); }
 });
 
-// Pre-warm/refresh job for popular cities — built and tested 26 June, but
-// DELIBERATELY LEFT UNSCHEDULED. Current demand data is entirely test/debug
-// city noise from today's speed-debugging session (Wellington, Kobe,
-// Koblenz, Cape Town, Seattle, Toronto, Cairo, Muscat) — none of that
-// reflects real user interest, so running this on a schedule right now
-// would just spend real money keeping diagnostic test cities warm.
-//
-// Trigger manually via GET /admin/prewarm?key=ADMIN_SECRET to test the
-// mechanism end-to-end without it running unattended. Uncomment the
-// cron.schedule block below once real post-launch demand data exists.
-// Runs on GMT/UTC (Etc/UTC) when enabled — adjust the hour if GMT 3am
-// turns out not to be the quietest point for real traffic once you have it.
-//
-// Thresholds (tune as real data comes in): top 10 cities by demand, 14-day
-// trailing window, minimum 3 requests to qualify (filters out one-off
-// curiosity searches), refresh anything missing or older than 22 hours.
-//
-// NOTE: deliberately does NOT include 'tours' in allCategories below —
-// nothing in Find an Experience should ever pre-generate; it stays
-// strictly on-demand per the build plan ("nothing fires until a topic's
-// chosen"), regardless of pre-warm being enabled for the other tabs.
+const allCategories = [...Object.keys(PROMPTS), 'essentials_info'];
 
 async function getTopCities(limit, sinceDays, minRequests) {
-  const since = new Date(Date.now() - sinceDays * 24 * 60 * 60 * 1000).toISOString();
+  const since = daysAgo(sinceDays);
   const rows = await supabaseSelect('usage_events', 'select=city,cache_status&created_at=gte.' + encodeURIComponent(since));
   const counts = {};
   rows.forEach(r => {
@@ -1498,7 +1424,6 @@ async function cacheAgeHours(cacheKey) {
 
 async function prewarmTopCities() {
   const topCities = await getTopCities(10, 14, 3);
-  const allCategories = [...Object.keys(PROMPTS), 'essentials_info'];
   let refreshedCount = 0;
   for (const city of topCities) {
     for (const category of allCategories) {
@@ -1512,7 +1437,7 @@ async function prewarmTopCities() {
         } catch (e) {
           console.error('PREWARM failed', cacheKey, e.message);
         }
-        await new Promise(r => setTimeout(r, 500)); // stagger — don't hammer the rate limit
+        await new Promise(r => setTimeout(r, 500));
       }
     }
   }
@@ -1537,9 +1462,24 @@ app.get('/admin/prewarm', async (req, res) => {
 app.get('/admin/daily-report', async (req, res) => {
   if (req.query.key !== process.env.ADMIN_SECRET) return res.status(403).json({ error: 'Forbidden' });
   try {
-    const report = await buildUsageReport();
+    const report = await buildUsageReport(1, 'last 24 hours');
     if (req.query.send === 'true') {
       await sendResendEmail({ subject: 'Localé Usage Report — ' + todayStr() + ' (test)', text: report.text, attachments: report.attachments });
+      return res.json({ status: 'sent' });
+    }
+    return res.json({ text: report.text });
+  } catch (e) {
+    console.error(e.message);
+    return res.status(500).json({ error: 'Failed to build report' });
+  }
+});
+
+app.get('/admin/weekly-report', async (req, res) => {
+  if (req.query.key !== process.env.ADMIN_SECRET) return res.status(403).json({ error: 'Forbidden' });
+  try {
+    const report = await buildUsageReport(7, 'last 7 days');
+    if (req.query.send === 'true') {
+      await sendResendEmail({ subject: 'Localé Weekly Report — ' + todayStr() + ' (test)', text: report.text, attachments: report.attachments });
       return res.json({ status: 'sent' });
     }
     return res.json({ text: report.text });
@@ -1552,7 +1492,7 @@ app.get('/admin/daily-report', async (req, res) => {
 app.get('/admin/daily-feedback', async (req, res) => {
   if (req.query.key !== process.env.ADMIN_SECRET) return res.status(403).json({ error: 'Forbidden' });
   try {
-    const report = await buildFeedbackReport();
+    const report = await buildFeedbackReport(1, 'last 24 hours');
     if (req.query.send === 'true') {
       await sendResendEmail({ subject: 'Localé Feedback — ' + todayStr() + ' (test)', text: report.text, attachments: report.attachments });
       return res.json({ status: 'sent' });
@@ -1612,6 +1552,204 @@ app.get('/admin/coffee-candidates', async (req, res) => {
   } catch (e) {
     console.error(e.message);
     res.status(500).json({ error: 'Failed to fetch candidates' });
+  }
+});
+
+// ===========================================================================
+// PARTNER DASHBOARD — visual page for affiliate/partner conversations
+// (Viator, Civitatis, future DMO/B2B partnerships). Served at GET /dashboard.
+// Password-protected via ?key=DASHBOARD_KEY — deliberately a separate key
+// from ADMIN_SECRET, since this one is meant to be handed to external
+// partners, not kept fully internal. Monthly (30-day) window. Content
+// ordered by what a partner actually wants to see: growth trend -> top
+// cities (geographic relevance) -> Find an Experience funnel (the actual
+// revenue-driving signal) -> top favourited categories (secondary context).
+// No token/cache/cost figures anywhere on this page — internal-report only.
+// ===========================================================================
+
+function dashboardUnauthorizedHTML() {
+  return `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Localé Dashboard</title>
+<style>body{font-family:-apple-system,sans-serif;background:#edfafa;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;}
+.box{background:#fff;border-radius:14px;padding:32px 40px;box-shadow:0 1px 6px rgba(0,0,0,0.08);text-align:center;}
+.logo{font-size:28px;font-weight:700;color:#039be5;margin-bottom:8px;}
+p{color:#888;font-size:14px;}</style></head>
+<body><div class="box"><div class="logo">Localé</div><p>This dashboard requires a valid access key.<br>Append <code>?key=...</code> to the URL.</p></div></body></html>`;
+}
+
+async function buildPartnerDashboardData() {
+  const since = daysAgo(30);
+
+  const usageEvents = await supabaseSelect('usage_events', 'select=city,category,cache_status,created_at&created_at=gte.' + encodeURIComponent(since));
+  const clicks = await supabaseSelect('click_events', 'select=city,category,item_name,link_type,created_at&created_at=gte.' + encodeURIComponent(since));
+  const cacheRows = await supabaseSelect('recommendations_cache', 'select=cache_key,created_at&created_at=gte.' + encodeURIComponent(since));
+  const favourites = await supabaseSelect('favourites', 'select=category,created_at&created_at=gte.' + encodeURIComponent(since));
+  const totalSearchesAllTime = await supabaseCount('recommendations_cache');
+
+  const realEvents = usageEvents.filter(e => e.cache_status !== 'prewarm');
+  const searches = realEvents.filter(e => e.category === 'essentials_info');
+
+  const dailyCounts = {};
+  searches.forEach(e => {
+    const day = (e.created_at || '').slice(0, 10);
+    if (day) dailyCounts[day] = (dailyCounts[day] || 0) + 1;
+  });
+  const trendDays = [];
+  for (let i = 29; i >= 0; i--) {
+    const d = new Date(Date.now() - i * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+    trendDays.push({ date: d, count: dailyCounts[d] || 0 });
+  }
+
+  const cityDemand = {};
+  realEvents.forEach(e => { if (e.city) cityDemand[e.city] = (cityDemand[e.city] || 0) + 1; });
+  const topCities = Object.entries(cityDemand).sort((a, b) => b[1] - a[1]).slice(0, 10);
+
+  const tourGenerations = cacheRows.filter(r => (r.cache_key || '').includes('|tours|')).length;
+  const tourPicks = realEvents.filter(e => e.category === 'tours').length + tourGenerations;
+  const tourClicks = clicks.filter(c => c.category === 'tours').length;
+  const themeBreakdown = {};
+  clicks.filter(c => c.category === 'tours').forEach(c => {
+    if (c.link_type) themeBreakdown[c.link_type] = (themeBreakdown[c.link_type] || 0) + 1;
+  });
+
+  const favByCategory = {};
+  favourites.forEach(f => { if (f.category) favByCategory[f.category] = (favByCategory[f.category] || 0) + 1; });
+  const topFavourites = Object.entries(favByCategory).sort((a, b) => b[1] - a[1]).slice(0, 6);
+
+  return {
+    totalSearches30d: searches.length,
+    totalSearchesAllTime: totalSearchesAllTime ?? null,
+    trendDays,
+    topCities,
+    tourPicks,
+    tourClicks,
+    themeBreakdown,
+    topFavourites,
+  };
+}
+
+function renderPartnerDashboardHTML(data) {
+  const trendLabels = JSON.stringify(data.trendDays.map(d => d.date.slice(5)));
+  const trendValues = JSON.stringify(data.trendDays.map(d => d.count));
+  const cityLabels = JSON.stringify(data.topCities.map(([c]) => c));
+  const cityValues = JSON.stringify(data.topCities.map(([, n]) => n));
+  const themeEntries = Object.entries(data.themeBreakdown).sort((a, b) => b[1] - a[1]);
+  const favLabels = JSON.stringify(data.topFavourites.map(([c]) => c));
+  const favValues = JSON.stringify(data.topFavourites.map(([, n]) => n));
+
+  return `<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Localé — Partner Dashboard</title>
+<style>
+  body { font-family: -apple-system, 'Segoe UI', Roboto, sans-serif; background: #edfafa; color: #1a1a1a; margin: 0; padding: 0 0 60px; }
+  .wrap { max-width: 900px; margin: 0 auto; padding: 40px 24px; }
+  .header { text-align: center; margin-bottom: 8px; }
+  .logo { font-size: 36px; font-weight: 700; color: #039be5; letter-spacing: -1px; }
+  .trust { font-size: 13px; color: #555; max-width: 480px; margin: 8px auto 36px; line-height: 1.5; }
+  .metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 14px; margin-bottom: 40px; }
+  .metric { background: #fff; border-radius: 14px; padding: 18px 20px; box-shadow: 0 1px 6px rgba(0,0,0,0.06); }
+  .metric .label { font-size: 12px; color: #888; margin: 0 0 4px; }
+  .metric .value { font-size: 26px; font-weight: 700; color: #1a1a1a; margin: 0; }
+  .section { margin-bottom: 48px; }
+  .section h2 { font-size: 18px; font-weight: 700; margin: 0 0 4px; color: #1a1a1a; }
+  .section p.sub { font-size: 13px; color: #888; margin: 0 0 16px; }
+  .card { background: #fff; border-radius: 14px; padding: 20px; box-shadow: 0 1px 6px rgba(0,0,0,0.06); }
+  canvas { max-width: 100%; }
+  .funnel { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
+  .funnel-stage { text-align: center; min-width: 110px; }
+  .funnel-stage .n { font-size: 28px; font-weight: 700; color: #039be5; }
+  .funnel-stage .l { font-size: 12px; color: #888; }
+  .funnel-arrow { font-size: 20px; color: #ccc; }
+  .theme-row { display: flex; justify-content: space-between; padding: 6px 0; border-bottom: 1px solid #f0f0f0; font-size: 13px; }
+  .theme-row:last-child { border-bottom: none; }
+  footer { text-align: center; font-size: 11px; color: #aaa; margin-top: 40px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="header">
+    <div class="logo">Localé</div>
+    <p class="trust">Real places, verified to exist. Curated by local knowledge — never by ratings or popularity, and never paid placement. This dashboard shows real traveller demand across the last 30 days.</p>
+  </div>
+
+  <div class="metrics">
+    <div class="metric"><p class="label">Searches, last 30 days</p><p class="value">${data.totalSearches30d.toLocaleString()}</p></div>
+    <div class="metric"><p class="label">Searches, all time</p><p class="value">${data.totalSearchesAllTime !== null ? data.totalSearchesAllTime.toLocaleString() : 'n/a'}</p></div>
+    <div class="metric"><p class="label">Cities covered (30d)</p><p class="value">${data.topCities.length > 0 ? data.topCities.length + '+' : '0'}</p></div>
+    <div class="metric"><p class="label">Experience clicks (30d)</p><p class="value">${data.tourClicks}</p></div>
+  </div>
+
+  <div class="section">
+    <h2>Search growth</h2>
+    <p class="sub">Daily searches, last 30 days</p>
+    <div class="card"><canvas id="trendChart" height="90"></canvas></div>
+  </div>
+
+  <div class="section">
+    <h2>Top cities by demand</h2>
+    <p class="sub">Where travellers are searching right now — last 30 days</p>
+    <div class="card"><canvas id="cityChart" height="${Math.max(data.topCities.length * 32, 120)}"></canvas></div>
+  </div>
+
+  <div class="section">
+    <h2>Find an Experience — booking funnel</h2>
+    <p class="sub">From theme selection to outbound booking click, last 30 days</p>
+    <div class="card">
+      <div class="funnel">
+        <div class="funnel-stage"><div class="n">${data.tourPicks}</div><div class="l">Theme picks</div></div>
+        <div class="funnel-arrow">→</div>
+        <div class="funnel-stage"><div class="n">${data.tourClicks}</div><div class="l">Booking clicks</div></div>
+        <div class="funnel-arrow">→</div>
+        <div class="funnel-stage"><div class="n">${data.tourPicks > 0 ? ((data.tourClicks / data.tourPicks) * 100).toFixed(1) + '%' : 'n/a'}</div><div class="l">Click-through rate</div></div>
+      </div>
+      ${themeEntries.length > 0 ? '<div style="margin-top:18px;border-top:1px solid #f0f0f0;padding-top:14px;">' + themeEntries.map(([t, n]) => `<div class="theme-row"><span>${t}</span><span>${n} click(s)</span></div>`).join('') + '</div>' : '<p style="font-size:13px;color:#888;margin-top:14px;">No theme-level click data yet.</p>'}
+    </div>
+  </div>
+
+  <div class="section">
+    <h2>Most-loved categories</h2>
+    <p class="sub">What travellers save to My List most often, last 30 days</p>
+    <div class="card"><canvas id="favChart" height="100"></canvas></div>
+  </div>
+
+  <footer>Localé — localetravelapp.com — data refreshed live on page load</footer>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
+<script>
+new Chart(document.getElementById('trendChart'), {
+  type: 'line',
+  data: { labels: ${trendLabels}, datasets: [{ data: ${trendValues}, borderColor: '#039be5', backgroundColor: 'rgba(3,155,229,0.08)', fill: true, tension: 0.3, pointRadius: 0, borderWidth: 2 }] },
+  options: { responsive: true, plugins: { legend: { display: false } }, scales: { y: { beginAtZero: true, grid: { color: '#f0f0f0' } }, x: { grid: { display: false }, ticks: { maxTicksLimit: 10 } } } }
+});
+new Chart(document.getElementById('cityChart'), {
+  type: 'bar',
+  data: { labels: ${cityLabels}, datasets: [{ data: ${cityValues}, backgroundColor: '#039be5', borderRadius: 4 }] },
+  options: { indexAxis: 'y', responsive: true, plugins: { legend: { display: false } }, scales: { x: { grid: { color: '#f0f0f0' } }, y: { grid: { display: false } } } }
+});
+new Chart(document.getElementById('favChart'), {
+  type: 'bar',
+  data: { labels: ${favLabels}, datasets: [{ data: ${favValues}, backgroundColor: '#1a7a3c', borderRadius: 4 }] },
+  options: { responsive: true, plugins: { legend: { display: false } }, scales: { y: { beginAtZero: true, grid: { color: '#f0f0f0' } }, x: { grid: { display: false } } } }
+});
+</script>
+</body>
+</html>`;
+}
+
+app.get('/dashboard', async (req, res) => {
+  if (!DASHBOARD_KEY || req.query.key !== DASHBOARD_KEY) {
+    res.set('Content-Type', 'text/html');
+    return res.status(401).send(dashboardUnauthorizedHTML());
+  }
+  try {
+    const data = await buildPartnerDashboardData();
+    res.set('Content-Type', 'text/html');
+    res.send(renderPartnerDashboardHTML(data));
+  } catch (e) {
+    console.error('Dashboard build error:', e.message);
+    res.status(500).send('Dashboard temporarily unavailable.');
   }
 });
 
