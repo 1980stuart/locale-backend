@@ -7,6 +7,7 @@ app.use(express.json());
 
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_KEY = process.env.SUPABASE_KEY;
+const VIATOR_API_KEY = process.env.VIATOR_API_KEY;
 
 function supabaseHeaders() {
   return {
@@ -43,6 +44,7 @@ const VENUE_CHECK_CONFIG = {
 // wrong well within 30 days, but we're starting everything equal and
 // watching real behaviour before tuning any single category down).
 // Bumping any one number is a one-line change, nothing else needs to move.
+// 'tours' added per the Find an Experience build — same 30-day default.
 const CACHE_TTL_DAYS = {
   essentials: 30,
   essentials_info: 30,
@@ -57,6 +59,7 @@ const CACHE_TTL_DAYS = {
   drink: 30,
   night: 30,
   mustsee: 30,
+  tours: 30,
 };
 
 async function geocodeCity(city) {
@@ -578,6 +581,276 @@ async function generateRecommendation(city, category, { deviceId = null, source 
   return data;
 }
 
+// ===========================================================================
+// FIND AN EXPERIENCE — Viator-curated tours/activities, added per the agreed
+// build plan. Primary source: Viator Affiliate API (search model). Falls
+// back to Claude-direct generation when Viator coverage is thin/absent for
+// a given city+theme. Every result tagged `source: 'affiliate'|'direct'`
+// from day one for clean reporting and future expansion. No exact pricing
+// shown — Budget/Mid-range/Premium tier derived from real price at
+// generation time instead, sidestepping 30-day cache staleness.
+//
+// KNOWN UNVERIFIED RISK: Viator's destination-search and /products/search
+// endpoint paths, field names, and response shape below are written from
+// documented patterns, NOT verified against a live response with your
+// actual key. Treat the first real /tours call as a debugging step — check
+// Railway logs for the raw response shape before trusting this in
+// production. Worth testing via /admin/viator-test below before relying on
+// the full curation flow.
+// ===========================================================================
+
+const TOUR_THEMES = {
+  walking: 'Walking Tours',
+  bike: 'Bike Tours',
+  cooking: 'Cooking Classes',
+  arthistory: 'Art & History Tours',
+  food: 'Food Tours',
+  daytrips: 'Day Trips & Excursions',
+  workshops: 'Cultural Workshops',
+};
+
+// Resolves a city name to Viator's internal destination ID, caching the
+// result in the same recommendations_cache table (under a distinct
+// 'viator_dest|' prefix so it never collides with real recommendation
+// cache keys) since this mapping is stable and shouldn't be re-fetched
+// per search.
+async function resolveViatorDestinationId(city) {
+  const cacheKey = 'viator_dest|' + city.trim().toLowerCase();
+  try {
+    const cached = await fetch(
+      SUPABASE_URL + '/rest/v1/recommendations_cache?cache_key=eq.' + encodeURIComponent(cacheKey) + '&select=*',
+      { headers: supabaseHeaders() }
+    );
+    const data = await cached.json();
+    if (Array.isArray(data) && data[0] && data[0].response_data && data[0].response_data.destinationId) {
+      return data[0].response_data.destinationId;
+    }
+  } catch (e) {
+    // cache check failed, fall through to a live lookup
+  }
+
+  try {
+    const r = await fetch('https://api.viator.com/partner/destinations', {
+      headers: {
+        'exp-api-key': VIATOR_API_KEY,
+        'Accept': 'application/json;version=2.0',
+        'Accept-Language': 'en-US'
+      }
+    });
+    const d = await r.json();
+    const destinations = Array.isArray(d.destinations) ? d.destinations : [];
+    const bareCityName = city.split(',')[0].trim().toLowerCase();
+    const match = destinations.find(dest => dest.name && dest.name.toLowerCase() === bareCityName);
+    if (!match) {
+      console.log('VIATOR_DEST_NOT_FOUND', city);
+      return null;
+    }
+    await saveToCache(cacheKey, { destinationId: match.destinationId });
+    return match.destinationId;
+  } catch (e) {
+    console.error('Viator destination lookup error:', e.message);
+    return null;
+  }
+}
+
+// Calls Viator's /products/search (search model) filtered by destination
+// and theme tag. Sorted by traveler rating, deliberately NOT Viator's
+// default 'featured' sort — featured placement can be influenced by what
+// operators pay Viator, which runs against the "never paid placement"
+// trust positioning the rest of the app is built on.
+async function fetchViatorProducts(destinationId, theme) {
+  try {
+    const r = await fetch('https://api.viator.com/partner/products/search', {
+      method: 'POST',
+      headers: {
+        'exp-api-key': VIATOR_API_KEY,
+        'Accept': 'application/json;version=2.0',
+        'Accept-Language': 'en-US',
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        filtering: { destination: destinationId, tags: [TOUR_THEMES[theme]] },
+        sorting: { sort: 'TRAVELER_RATING' },
+        pagination: { start: 1, count: 20 }
+      })
+    });
+    const d = await r.json();
+    if (!Array.isArray(d.products)) {
+      console.log('VIATOR_SEARCH_UNEXPECTED_SHAPE', JSON.stringify(d).slice(0, 300));
+      return [];
+    }
+    return d.products;
+  } catch (e) {
+    console.error('Viator product search error:', e.message);
+    return [];
+  }
+}
+
+// Direct-generation fallback prompt — same "doubt means leave it out"
+// principle as the rest of the app, applied to providers instead of venues.
+// Used only when Viator returns thin/no coverage for a city+theme.
+const TOUR_DIRECT_PROMPT = (city, themeLabel) => `You are Localé's Experience Agent for ${city}. Suggest genuine, locally-rooted ${themeLabel.toLowerCase()} a traveller could book. THE BOURDAIN TEST APPLIES — favour small, independent, locally-run operators over mass-market tour companies.
+
+STRICT RULES:
+- Only suggest experiences you are highly confident genuinely exist and operate in ${city}. If uncertain, omit.
+- Never invent a specific operator name with fabricated pricing — if you cannot be confident a named operator exists, describe the type of experience and a search term instead of inventing a business name.
+- 3 to 5 items only.
+
+Return JSON: {"items":[{"name":"","operator":"","description":"","priceTier":"Budget|Mid-range|Premium","bookingSearch":""}]}`;
+
+function tierFromPrice(price) {
+  if (price == null || typeof price !== 'number') return null;
+  if (price < 40) return 'Budget';
+  if (price < 120) return 'Mid-range';
+  return 'Premium';
+}
+
+async function generateTourRecommendation(city, theme) {
+  const themeLabel = TOUR_THEMES[theme] || theme;
+  const cacheKey = city.trim().toLowerCase() + '|tours|' + theme;
+  const t0 = Date.now();
+
+  const destinationId = await resolveViatorDestinationId(city);
+  let viatorProducts = [];
+  if (destinationId) viatorProducts = await fetchViatorProducts(destinationId, theme);
+
+  if (viatorProducts.length >= 3) {
+    const candidateList = viatorProducts.slice(0, 20).map(p => {
+      const price = p.pricing && p.pricing.summary && typeof p.pricing.summary.fromPrice === 'number' ? p.pricing.summary.fromPrice : null;
+      const rating = p.reviews && p.reviews.combinedAverageRating;
+      return '- ' + (p.title || 'Untitled') + ' | productCode: ' + p.productCode + ' | priceTier: ' + (tierFromPrice(price) || 'unknown') + ' | rating: ' + (rating || 'n/a');
+    }).join('\n');
+
+    try {
+      const r = await fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-api-key': process.env.ANTHROPIC_KEY,
+          'anthropic-version': '2023-06-01'
+        },
+        body: JSON.stringify({
+          model: 'claude-sonnet-4-6',
+          max_tokens: 1200,
+          system: 'Return only valid JSON. No markdown, no commentary.',
+          messages: [{
+            role: 'user',
+            content: `From this real list of ${themeLabel} in ${city}, pick the best 3-5 — favour small-group, private, or local-operator-led experiences over mass-market/big-bus tours, even if not top-rated. Write a one-sentence Localé-voice pitch for each (local, honest, specific, no generic enthusiasm). Use the priceTier given for each candidate as-is, do not invent a different one.\n\n${candidateList}\n\nReturn JSON: {"items":[{"name":"","productCode":"","pitch":"","priceTier":"Budget|Mid-range|Premium"}]}`
+          }]
+        })
+      });
+      const data = await r.json();
+      const parsed = extractJSONServer(data.content[0].text);
+      parsed.items = (parsed.items || []).map(item => {
+        const match = viatorProducts.find(p => p.productCode === item.productCode);
+        return {
+          ...item,
+          source: 'affiliate',
+          // NOTE: confirm the actual affiliate-tagged URL field name against
+          // a live Viator response before trusting this in production —
+          // productUrl is the documented pattern, not yet verified live.
+          bookingUrl: match ? (match.productUrl || null) : null,
+        };
+      });
+      const result = { content: [{ type: 'text', text: JSON.stringify(parsed) }], usage: data.usage };
+      console.log('TIMING', cacheKey, 'total=' + (Date.now() - t0) + 'ms (tours, affiliate path, ' + viatorProducts.length + ' Viator candidates)');
+      logUsageEvent(null, city, 'tours', 'miss', data.usage);
+      saveToCache(cacheKey, result);
+      return result;
+    } catch (e) {
+      console.error('Tour curation (affiliate path) error:', e.message);
+      // fall through to direct generation below
+    }
+  }
+
+  // Fallback — thin/no Viator coverage for this city+theme, or the
+  // affiliate-path curation call itself failed.
+  try {
+    const r = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': process.env.ANTHROPIC_KEY,
+        'anthropic-version': '2023-06-01'
+      },
+      body: JSON.stringify({
+        model: 'claude-sonnet-4-6',
+        max_tokens: 1000,
+        system: 'Return only valid JSON. No markdown, no commentary.',
+        messages: [{ role: 'user', content: TOUR_DIRECT_PROMPT(city, themeLabel) }]
+      })
+    });
+    const data = await r.json();
+    const parsed = extractJSONServer(data.content[0].text);
+    parsed.items = (parsed.items || []).map(item => ({ ...item, source: 'direct' }));
+    const result = { content: [{ type: 'text', text: JSON.stringify(parsed) }], usage: data.usage };
+    console.log('TIMING', cacheKey, 'total=' + (Date.now() - t0) + 'ms (tours, direct fallback path)');
+    logUsageEvent(null, city, 'tours', 'miss', data.usage);
+    saveToCache(cacheKey, result);
+    return result;
+  } catch (e) {
+    console.error('Tour direct generation error:', e.message);
+    return { content: [{ type: 'text', text: '{"items":[]}' }] };
+  }
+}
+
+app.post('/tours', async (req, res) => {
+  try {
+    const { city, theme, device_id } = req.body;
+    if (!city || !theme || !TOUR_THEMES[theme]) {
+      return res.status(400).json({ error: 'city and a valid theme are required' });
+    }
+    const cacheKey = city.trim().toLowerCase() + '|tours|' + theme;
+
+    try {
+      const cacheCheck = await fetch(
+        SUPABASE_URL + '/rest/v1/recommendations_cache?cache_key=eq.' + encodeURIComponent(cacheKey) + '&select=*',
+        { headers: supabaseHeaders() }
+      );
+      const cached = await cacheCheck.json();
+      if (Array.isArray(cached) && cached[0]) {
+        const ageMs = Date.now() - new Date(cached[0].created_at).getTime();
+        const ttlMs = (CACHE_TTL_DAYS.tours || 30) * 24 * 60 * 60 * 1000;
+        if (ageMs < ttlMs) {
+          console.log('CACHE_HIT', cacheKey);
+          logUsageEvent(device_id, city, 'tours', 'hit');
+          return res.json(cached[0].response_data);
+        }
+      }
+    } catch (e) {
+      // cache check failed, continue to generate fresh
+    }
+
+    console.log('CACHE_MISS', cacheKey);
+    const data = await generateTourRecommendation(city, theme);
+    res.json(data);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Debugging aid — added alongside the Find an Experience build. Lets you
+// hit Viator's product search directly via the browser/Postman to confirm
+// the real response shape before trusting the curation flow above. Not
+// linked from the app itself.
+app.get('/admin/viator-test', async (req, res) => {
+  if (req.query.key !== process.env.ADMIN_SECRET) return res.status(403).json({ error: 'Forbidden' });
+  const city = req.query.city;
+  const theme = req.query.theme || 'walking';
+  if (!city) return res.status(400).json({ error: 'city query param is required' });
+  try {
+    const destinationId = await resolveViatorDestinationId(city);
+    if (!destinationId) {
+      return res.json({ city, destinationId: null, note: 'No Viator destination match found for this city name.' });
+    }
+    const products = await fetchViatorProducts(destinationId, theme);
+    res.json({ city, theme, destinationId, count: products.length, products });
+  } catch (e) {
+    console.error(e.message);
+    res.status(500).json({ error: 'Failed to test Viator search' });
+  }
+});
+
 app.post('/claude', async (req, res) => {
   try {
     const response = await fetch('https://api.anthropic.com/v1/messages', {
@@ -1008,6 +1281,27 @@ async function buildUsageReport() {
     if (c.link_type) clicksByType[c.link_type] = (clicksByType[c.link_type] || 0) + 1;
   });
 
+  // Find an Experience reporting — added per the agreed build plan.
+  // Theme demand combines tour-related outbound clicks (link_type holds the
+  // theme key, since the frontend's logClick call passes theme as linkType
+  // for this category) with first-time generations (new cache rows whose
+  // key contains '|tours|') so the figure reflects both "people clicked
+  // book" and "people searched this combo for the first time" — the future
+  // sales-pitch data point ("200 people searched cooking classes in
+  // Lisbon"). Source split (affiliate vs direct) requires reading each new
+  // tours cache row's actual response_data, since source is stored inside
+  // the cached JSON payload, not in click_events/usage_events themselves.
+  const tourClicks = newClicks.filter(c => c.category === 'tours');
+  const tourThemeDemand = {};
+  tourClicks.forEach(c => {
+    if (c.link_type) tourThemeDemand[c.link_type] = (tourThemeDemand[c.link_type] || 0) + 1;
+  });
+  const tourCacheRows = newCacheRows.filter(row => (row.cache_key || '').includes('|tours|'));
+  tourCacheRows.forEach(row => {
+    const theme = (row.cache_key || '').split('|tours|')[1];
+    if (theme) tourThemeDemand[theme] = (tourThemeDemand[theme] || 0) + 1;
+  });
+
   // Tab engagement — added 26 June. The key signal for any future lazy-load
   // decision: what fraction of real searches actually opened each tab,
   // versus the 100%-by-design preload-everything figure categoryDemand
@@ -1073,6 +1367,10 @@ async function buildUsageReport() {
     sortDesc(clicksByCategory).map(([c, n]) => '  - ' + c + ': ' + n).join('\n') || '  (none yet)',
     'By link type:',
     sortDesc(clicksByType).map(([c, n]) => '  - ' + c + ': ' + n).join('\n') || '  (none yet)',
+    '',
+    'FIND AN EXPERIENCE — THEME DEMAND (last 24h, first-time generations + outbound clicks combined)',
+    '- Total tour-related outbound clicks: ' + tourClicks.length,
+    sortDesc(tourThemeDemand).map(([t, n]) => '- ' + t + ': ' + n).join('\n') || '(none yet)',
     '',
     'TAB ENGAGEMENT (last 24h — % of real searches that opened each tab; the key signal for any future lazy-load decision)',
     '- Total searches (approx, via essentials_info): ' + searchesCount,
@@ -1172,6 +1470,11 @@ cron.schedule('0 4 * * *', async () => {
 // Thresholds (tune as real data comes in): top 10 cities by demand, 14-day
 // trailing window, minimum 3 requests to qualify (filters out one-off
 // curiosity searches), refresh anything missing or older than 22 hours.
+//
+// NOTE: deliberately does NOT include 'tours' in allCategories below —
+// nothing in Find an Experience should ever pre-generate; it stays
+// strictly on-demand per the build plan ("nothing fires until a topic's
+// chosen"), regardless of pre-warm being enabled for the other tabs.
 
 async function getTopCities(limit, sinceDays, minRequests) {
   const since = new Date(Date.now() - sinceDays * 24 * 60 * 60 * 1000).toISOString();
