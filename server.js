@@ -653,7 +653,7 @@ function tierFromPrice(price) {
 }
 
 async function generateTourRecommendation(city, theme) {
-  const themeLabel = TOUR_THEMES[theme] || theme;
+ const themeLabel = TOUR_THEMES[theme]?.label || theme;
   const cacheKey = city.trim().toLowerCase() + '|tours|' + theme;
   const t0 = Date.now();
 
